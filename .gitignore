@@ -163,3 +163,18 @@ gui_config.json
 
 # 图标尺寸检查图（由 packaging/build_logo_ico.py 生成）
 packaging/assets/logo_preview.png
+
+# Local credentials and development records
+.env*
+!.env.example
+AGENTS.md
+CLAUDE.md
+docs/handoff/
+docs/artifacts/
+private/
+*.har
+*capture*.txt
+SESSION-LOG*
+TASKS.yaml
+HANDOFF*
+AUDIT-REPORT*
