@@ -18,7 +18,7 @@ from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception
 from tqdm import tqdm
 
-from api.answer import Tiku, TikuManual, _image_choice, _choice_letters
+from api.answer import Tiku, TikuManual, _has_image, _image_choice, _choice_letters
 from api.answer_check import cut
 from api.cipher import AESCipher
 from api.config import GlobalConst as gc
@@ -1117,6 +1117,12 @@ class Chaoxing:
                         q[f'answerSource{q["id"]}'] = "unresolved"
                         unresolved_image_choice = True
                         logger.warning("图片选择题无有效选项字母，留空并仅保存，需人工检查")
+                elif _has_image(q) and not res:
+                    # 图片不可用时禁止判断题或其他图片题走随机答案分支。
+                    answer = ""
+                    q[f'answerSource{q["id"]}'] = "unresolved"
+                    unresolved_image_choice = True
+                    logger.warning("图片题资源不可用，留空并仅保存，需人工检查")
                 elif not res:
                     # 随机答题
                     answer = random_answer(q["options"], q["type"])

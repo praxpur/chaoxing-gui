@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from re import sub
 from typing import Optional
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import requests
@@ -35,12 +36,16 @@ _IMAGE_TAG_RE = re.compile(
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
+def _has_image(q_info: dict) -> bool:
+    """Return whether a question or its options contain an image tag."""
+    return bool(_IMAGE_TAG_RE.search(q_info.get('title', '') + q_info.get('options', '')))
+
+
 def _image_choice(q_info: dict) -> bool:
+    """Select letter-mode answering for choices with image-bearing content."""
     # 题干图片和选项图片都可能承载公式；统一要求模型返回选项字母，
     # 避免把视觉识别出的公式正文拿去和选项文本匹配。
-    return q_info.get('type') in {'single', 'multiple'} and bool(
-        _IMAGE_TAG_RE.search(q_info.get('title', '') + q_info.get('options', ''))
-    )
+    return q_info.get('type') in {'single', 'multiple'} and _has_image(q_info)
 
 
 def _choice_letters(answer, q_info: dict) -> str:
@@ -61,70 +66,124 @@ def _choice_letters(answer, q_info: dict) -> str:
 
 
 def _question_cache_key(q_info: dict) -> str:
+    """Key image answers by type and options, excluding unsafe legacy caches."""
     # 旧图题缓存存的是公式正文，无法和图片选项匹配。独立命名且包含选项，
     # 同一题目换选项顺序时也必须重新查询。
-    if _IMAGE_TAG_RE.search(q_info.get('title', '') + q_info.get('options', '')):
+    if _has_image(q_info):
         payload = json.dumps([q_info.get('type'), q_info['title'], q_info.get('options', '')],
                              ensure_ascii=False)
-        return 'vision-choices-v2:' + hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        return 'vision-choices-v3:' + hashlib.sha256(payload.encode('utf-8')).hexdigest()
     return q_info['title']
 
 
-def _image_data_url(image_url: str) -> str:
-    """将题目图片转为 data URL，避免模型服务无法访问学习通图片地址。"""
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _is_chaoxing_host(hostname: Optional[str]) -> bool:
+    """Return whether a hostname belongs to chaoxing.com."""
+    host = (hostname or '').rstrip('.').lower()
+    return host == 'chaoxing.com' or host.endswith('.chaoxing.com')
+
+
+def _chaoxing_cookie_jar(cookies: dict) -> requests.cookies.RequestsCookieJar:
+    """Build a cookie jar scoped to Chaoxing's domain and path."""
+    jar = requests.cookies.RequestsCookieJar()
+    for name, value in cookies.items():
+        jar.set(name, value, domain='.chaoxing.com', path='/')
+    return jar
+
+
+def _image_data_url(image_url: str) -> Optional[str]:
+    """Download a question image without leaking session cookies off-origin."""
     image_url = html.unescape(image_url.strip())
-    if not image_url or image_url.lower().startswith("data:"):
-        return image_url
+    if not image_url:
+        return None
+    if image_url.lower().startswith("data:"):
+        try:
+            header, encoded = image_url.split(',', 1)
+            if not header.lower().startswith('data:image/') or not header.lower().endswith(';base64'):
+                return None
+            if len(encoded) > ((_MAX_IMAGE_BYTES + 2) // 3) * 4:
+                return None
+            content = base64.b64decode(encoded, validate=True)
+            return image_url if content and len(content) <= _MAX_IMAGE_BYTES else None
+        except ValueError:
+            return None
 
-    # 学习通图片通常要求登录 Cookie 和 Referer；复用项目已有的 Cookie 文件，
-    # 不把 Cookie 放进日志或发给题库 API。
-    from api.cookies import use_cookies
+    parsed = urlparse(image_url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        logger.warning("题目图片地址不可用，将跳过该图片")
+        return None
 
-    headers = {
+    base_headers = {
         "User-Agent": "Mozilla/5.0",
-        "Referer": "https://mooc1.chaoxing.com/",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     }
-    cookies = use_cookies()
     candidate_urls = [image_url]
     if image_url.lower().startswith("http://"):
         candidate_urls.append("https://" + image_url[7:])
 
     last_error = None
     for candidate_url in candidate_urls:
+        current_url = candidate_url
+        cookie_jar = None
         try:
-            response = requests.get(
-                candidate_url,
-                headers=headers,
-                cookies=cookies,
-                timeout=15,
-            )
-            response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip()
-            if not content_type.startswith("image/"):
-                content_type = mimetypes.guess_type(candidate_url)[0] or "image/png"
-            # 避免异常大的图片把请求体撑爆；模型若能访问公网仍可使用原始 URL。
-            if len(response.content) > 10 * 1024 * 1024:
-                logger.warning("题目图片过大，将直接传递图片 URL")
-                return candidate_url
-            encoded = base64.b64encode(response.content).decode("ascii")
-            return f"data:{content_type};base64,{encoded}"
-        except requests.RequestException as exc:
+            # Do not let requests automatically carry cookies across a redirect.
+            # Each hop is checked independently and only Chaoxing hosts receive
+            # the domain-scoped cookie jar.
+            for _ in range(4):
+                parsed = urlparse(current_url)
+                if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+                    raise ValueError("unsupported image redirect URL")
+                is_chaoxing = _is_chaoxing_host(parsed.hostname)
+                if is_chaoxing and cookie_jar is None:
+                    from api.cookies import use_cookies
+                    cookie_jar = _chaoxing_cookie_jar(use_cookies())
+                headers = dict(base_headers)
+                if is_chaoxing:
+                    headers["Referer"] = "https://mooc1.chaoxing.com/"
+                response = requests.get(
+                    current_url,
+                    headers=headers,
+                    cookies=cookie_jar if is_chaoxing else None,
+                    timeout=15,
+                    allow_redirects=False,
+                )
+                if 300 <= response.status_code < 400:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("image redirect has no location")
+                    current_url = urljoin(current_url, location)
+                    continue
+
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip()
+                if not content_type:
+                    content_type = mimetypes.guess_type(current_url)[0] or ""
+                if not content_type.startswith("image/"):
+                    raise ValueError("image response is not an image")
+                if not response.content or len(response.content) > _MAX_IMAGE_BYTES:
+                    raise ValueError("image exceeds size limit")
+                encoded = base64.b64encode(response.content).decode("ascii")
+                return f"data:{content_type};base64,{encoded}"
+            raise ValueError("too many image redirects")
+        except (requests.RequestException, ValueError) as exc:
             last_error = exc
 
-    logger.warning("题目图片下载失败，将直接传递图片 URL: {}", type(last_error).__name__)
-    return image_url
+    logger.warning("题目图片不可用，将留空并保存: {}", type(last_error).__name__)
+    return None
 
 
-def _multimodal_content(value: str) -> tuple[object, bool]:
-    """把包含 img 标签的 HTML 文本转换为 OpenAI content parts。"""
+def _multimodal_content(value: str) -> tuple[object, bool, bool]:
+    """Convert HTML with images to content parts and report image availability."""
     value = str(value or "")
     matches = list(_IMAGE_TAG_RE.finditer(value))
     if not matches:
-        return html.unescape(_HTML_TAG_RE.sub("", value)), False
+        return html.unescape(_HTML_TAG_RE.sub("", value)), False, True
 
     logger.debug("检测到 {} 个图片资源，使用多模态请求", len(matches))
     parts = []
+    images_available = True
     cursor = 0
     for match in matches:
         text_part = html.unescape(_HTML_TAG_RE.sub("", value[cursor:match.start()]))
@@ -133,12 +192,14 @@ def _multimodal_content(value: str) -> tuple[object, bool]:
         image_url = _image_data_url(match.group(2))
         if image_url:
             parts.append({"type": "image_url", "image_url": {"url": image_url}})
+        else:
+            images_available = False
         cursor = match.end()
 
     tail = html.unescape(_HTML_TAG_RE.sub("", value[cursor:]))
     if tail:
         parts.append({"type": "text", "text": tail})
-    return parts, True
+    return parts, True, images_available
 
 __all__ = ["CacheDAO", "Tiku", "TikuFallback", "TikuYanxi", "TikuGo", "TikuLike", "TikuAdapter", "AI", "SiliconFlow",
            "TikuManual"]
@@ -1434,9 +1495,12 @@ class AI(Tiku):
             re.sub(r"^[A-Z]\s*", "", option) for option in options_list
         ]
         options = "\n".join(cleaned_options)
-        question_content, has_images = _multimodal_content(
+        question_content, has_images, images_available = _multimodal_content(
             f"题目：{q_info['title']}\n选项：{options}"
         )
+        if has_images and not images_available:
+            logger.warning("题目图片不可用，跳过 AI 作答并留空")
+            return None
 
         # 上一轮章节检测的错误反馈（若有）
         feedback_text = self._build_work_feedback_text()
@@ -1646,9 +1710,12 @@ class SiliconFlow(Tiku):
             "Content-Type": "application/json"
         }
 
-        question_content, has_images = _multimodal_content(
+        question_content, has_images, images_available = _multimodal_content(
             f"题目：{q_info['title']}\n选项：{q_info['options']}"
         )
+        if has_images and not images_available:
+            logger.warning("题目图片不可用，跳过 AI 作答并留空")
+            return None
 
         # 构造系统提示词
         system_prompt = ""
