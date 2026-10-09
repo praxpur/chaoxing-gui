@@ -40,6 +40,16 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertEqual(content[1]["type"], "image_url")
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
 
+    @patch("api.answer.requests.get")
+    def test_mixed_content_type_header_finds_image_mime(self, get):
+        response = _ImageResponse()
+        response.headers = {"Content-Type": "application/octet-stream, image/jpeg;charset=UTF-8"}
+        get.return_value = response
+
+        result = answer._image_data_url("https://mooc1.chaoxing.com/ananas/latex/p/19507")
+
+        self.assertTrue(result.startswith("data:image/jpeg;base64,"))
+
     def test_plain_html_becomes_text(self):
         content, has_images, images_available = answer._multimodal_content("题目：x<sup>2</sup>+1")
 
@@ -89,6 +99,27 @@ class MultimodalContentTestCase(unittest.TestCase):
 
         self.assertTrue(result.startswith("data:image/png;base64,"))
         self.assertEqual(get.call_args.args[0], "https://p.ananas.chaoxing.com/q.png")
+
+    @patch("api.cookies.use_cookies", return_value={"session": "secret"})
+    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    def test_relative_formula_image_uses_https_work_origin(self, get, _cookies):
+        """Resolve quiz formula paths before validating the scheme and cookies."""
+        result = answer._image_data_url("/ananas/latex/p/test-formula")
+
+        self.assertTrue(result.startswith("data:image/png;base64,"))
+        self.assertEqual(get.call_args.args[0], "https://mooc1.chaoxing.com/ananas/latex/p/test-formula")
+        self.assertEqual(list(get.call_args.kwargs["cookies"])[0].domain, ".chaoxing.com")
+
+    @patch("api.cookies.use_cookies")
+    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    def test_protocol_relative_external_image_has_no_cookies(self, get, cookies):
+        """Resolving protocol-relative URLs must retain the off-origin boundary."""
+        result = answer._image_data_url("//external.test/q.png")
+
+        self.assertTrue(result.startswith("data:image/png;base64,"))
+        self.assertEqual(get.call_args.args[0], "https://external.test/q.png")
+        self.assertIsNone(get.call_args.kwargs["cookies"])
+        cookies.assert_not_called()
 
     @patch("api.answer.requests.get")
     def test_http_redirect_is_rejected_without_followup_request(self, get):

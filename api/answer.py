@@ -111,6 +111,11 @@ def _image_data_url(image_url: str) -> Optional[str]:
             return None
 
     parsed = urlparse(image_url)
+    if not parsed.scheme:
+        # Work-page formula images may use root-relative or protocol-relative
+        # URLs. Resolve them against the HTTPS origin that serves the quiz.
+        image_url = urljoin('https://mooc1.chaoxing.com/', image_url)
+        parsed = urlparse(image_url)
     if parsed.scheme == 'http':
         # Chaoxing pages may embed HTTP image URLs; upgrade before any request
         # so credentials are never sent over an unencrypted connection.
@@ -160,9 +165,12 @@ def _image_data_url(image_url: str) -> Optional[str]:
                     continue
 
                 response.raise_for_status()
-                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip()
+                content_type_header = response.headers.get("Content-Type", "")
+                content_types = [part.strip().lower() for part in re.split(r"[,;]", content_type_header)]
+                content_type = next((part for part in content_types if part.startswith("image/")), "")
                 if not content_type:
-                    content_type = mimetypes.guess_type(current_url)[0] or ""
+                    guessed_type = mimetypes.guess_type(current_url)[0] or ""
+                    content_type = guessed_type.lower() if guessed_type.startswith("image/") else ""
                 if not content_type.startswith("image/"):
                     raise ValueError("image response is not an image")
                 if not response.content or len(response.content) > _MAX_IMAGE_BYTES:
