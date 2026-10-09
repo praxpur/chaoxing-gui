@@ -1,5 +1,9 @@
 import configparser
+import base64
+import html
+import hashlib
 import json
+import mimetypes
 import os
 import random
 import re
@@ -22,6 +26,119 @@ from api.logger import logger
 
 # 关闭警告
 disable_warnings(exceptions.InsecureRequestWarning)
+
+
+_IMAGE_TAG_RE = re.compile(
+    r"<img\b[^>]*\bsrc\s*=\s*(['\"])(.*?)\1[^>]*>",
+    re.IGNORECASE,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _image_choice(q_info: dict) -> bool:
+    # 题干图片和选项图片都可能承载公式；统一要求模型返回选项字母，
+    # 避免把视觉识别出的公式正文拿去和选项文本匹配。
+    return q_info.get('type') in {'single', 'multiple'} and bool(
+        _IMAGE_TAG_RE.search(q_info.get('title', '') + q_info.get('options', ''))
+    )
+
+
+def _choice_letters(answer, q_info: dict) -> str:
+    """只接受明确的选项字母，禁止从公式或说明文字中猜测选项。"""
+    if not isinstance(answer, str):
+        return ''
+    compact = re.sub(r'[\s,，、;；]+', '', answer).upper()
+    if not re.fullmatch(r'[A-Z]+', compact):
+        return ''
+    valid = {m.group(1) for option in q_info.get('options', '').splitlines()
+             if (m := re.match(r'^\s*([A-Z])(?:\s|[.、:：)]|<)', option))}
+    letters = ''.join(sorted(set(compact)))
+    if not letters or not set(letters) <= valid:
+        return ''
+    if q_info['type'] == 'single' and len(letters) != 1:
+        return ''
+    return letters
+
+
+def _question_cache_key(q_info: dict) -> str:
+    # 旧图题缓存存的是公式正文，无法和图片选项匹配。独立命名且包含选项，
+    # 同一题目换选项顺序时也必须重新查询。
+    if _IMAGE_TAG_RE.search(q_info.get('title', '') + q_info.get('options', '')):
+        payload = json.dumps([q_info.get('type'), q_info['title'], q_info.get('options', '')],
+                             ensure_ascii=False)
+        return 'vision-choices-v2:' + hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    return q_info['title']
+
+
+def _image_data_url(image_url: str) -> str:
+    """将题目图片转为 data URL，避免模型服务无法访问学习通图片地址。"""
+    image_url = html.unescape(image_url.strip())
+    if not image_url or image_url.lower().startswith("data:"):
+        return image_url
+
+    # 学习通图片通常要求登录 Cookie 和 Referer；复用项目已有的 Cookie 文件，
+    # 不把 Cookie 放进日志或发给题库 API。
+    from api.cookies import use_cookies
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://mooc1.chaoxing.com/",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    }
+    cookies = use_cookies()
+    candidate_urls = [image_url]
+    if image_url.lower().startswith("http://"):
+        candidate_urls.append("https://" + image_url[7:])
+
+    last_error = None
+    for candidate_url in candidate_urls:
+        try:
+            response = requests.get(
+                candidate_url,
+                headers=headers,
+                cookies=cookies,
+                timeout=15,
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip()
+            if not content_type.startswith("image/"):
+                content_type = mimetypes.guess_type(candidate_url)[0] or "image/png"
+            # 避免异常大的图片把请求体撑爆；模型若能访问公网仍可使用原始 URL。
+            if len(response.content) > 10 * 1024 * 1024:
+                logger.warning("题目图片过大，将直接传递图片 URL")
+                return candidate_url
+            encoded = base64.b64encode(response.content).decode("ascii")
+            return f"data:{content_type};base64,{encoded}"
+        except requests.RequestException as exc:
+            last_error = exc
+
+    logger.warning("题目图片下载失败，将直接传递图片 URL: {}", type(last_error).__name__)
+    return image_url
+
+
+def _multimodal_content(value: str) -> tuple[object, bool]:
+    """把包含 img 标签的 HTML 文本转换为 OpenAI content parts。"""
+    value = str(value or "")
+    matches = list(_IMAGE_TAG_RE.finditer(value))
+    if not matches:
+        return html.unescape(_HTML_TAG_RE.sub("", value)), False
+
+    logger.debug("检测到 {} 个图片资源，使用多模态请求", len(matches))
+    parts = []
+    cursor = 0
+    for match in matches:
+        text_part = html.unescape(_HTML_TAG_RE.sub("", value[cursor:match.start()]))
+        if text_part:
+            parts.append({"type": "text", "text": text_part})
+        image_url = _image_data_url(match.group(2))
+        if image_url:
+            parts.append({"type": "image_url", "image_url": {"url": image_url}})
+        cursor = match.end()
+
+    tail = html.unescape(_HTML_TAG_RE.sub("", value[cursor:]))
+    if tail:
+        parts.append({"type": "text", "text": tail})
+    return parts, True
 
 __all__ = ["CacheDAO", "Tiku", "TikuFallback", "TikuYanxi", "TikuGo", "TikuLike", "TikuAdapter", "AI", "SiliconFlow",
            "TikuManual"]
@@ -242,7 +359,7 @@ class Tiku(ABC):
         # 先过缓存（若存在章节检测错误反馈，说明处于重做模式，跳过缓存让大模型参考反馈重新作答）
         if not getattr(self, 'work_feedback', None):
             cache_dao = CacheDAO()
-            answer = cache_dao.get_cache(q_info['title'])
+            answer = cache_dao.get_cache(_question_cache_key(q_info))
             if answer:
                 logger.info(f"从缓存中获取答案：{q_info['title']} -> {answer}")
                 return answer.strip()
@@ -254,7 +371,7 @@ class Tiku(ABC):
                 answer = answer.strip()
                 logger.info(f"从{self.name}获取答案：{q_info['title']} -> {answer}")
                 if check_answer(answer, q_info['type'], self):
-                    cache_dao.add_cache(q_info['title'], answer)
+                    cache_dao.add_cache(_question_cache_key(q_info), answer)
                     return answer
                 else:
                     logger.info(f"从{self.name}获取到的答案类型与题目类型不符，已舍弃")
@@ -285,7 +402,7 @@ class Tiku(ABC):
                 pending_indices.append(idx)
                 continue
 
-            answer = cache_dao.get_cache(q['title'])
+            answer = cache_dao.get_cache(_question_cache_key(q))
             if answer:
                 logger.info(f"从缓存中获取答案：{q['title']} -> {answer}")
                 results[idx] = answer.strip()
@@ -314,7 +431,7 @@ class Tiku(ABC):
                 ans = ans.strip()
                 logger.info(f"从{self.name}获取答案：{q_info['title']} -> {ans}")
                 if check_answer(ans, q_info['type'], self):
-                    cache_dao.add_cache(q_info['title'], ans)
+                    cache_dao.add_cache(_question_cache_key(q_info), ans)
                     results[idx] = ans
                 else:
                     logger.info(f"从{self.name}获取到的答案类型与题目类型不符，已舍弃")
@@ -1312,14 +1429,31 @@ class AI(Tiku):
             client = OpenAI(base_url=self.endpoint, api_key=self.key)
         # 去除选项字母，防止大模型直接输出字母而非内容
         options_list = q_info['options'].split('\n')
-        cleaned_options = [re.sub(r"^[A-Z]\s*", "", option) for option in options_list]
+        image_choice = _image_choice(q_info)
+        cleaned_options = options_list if image_choice else [
+            re.sub(r"^[A-Z]\s*", "", option) for option in options_list
+        ]
         options = "\n".join(cleaned_options)
+        question_content, has_images = _multimodal_content(
+            f"题目：{q_info['title']}\n选项：{options}"
+        )
 
         # 上一轮章节检测的错误反馈（若有）
         feedback_text = self._build_work_feedback_text()
 
-        def _make_messages(system_content: str, user_content: str) -> list:
+        def _make_messages(system_content: str, user_content: object) -> list:
             """构造带反馈上下文的消息列表."""
+            if has_images:
+                system_content += (
+                    "\n题干或选项包含图片。请识别图片中的文字、公式和图形信息后再作答，"
+                    "如果无法可靠识别，请返回 {\"Answer\": []}，不要猜测。"
+                )
+            if image_choice:
+                system_content = (
+                    '根据题干和各选项字母后紧随的图片作答。单选只选择一个字母，多选选择所有正确字母。'
+                    '只输出 JSON，例如 {"Answer":["B"]} 或 {"Answer":["A","C"]}。'
+                    '不要返回公式或选项正文。如果图片不清楚或无法判断，返回 {"Answer":[]}。'
+                )
             messages = [
                 {
                     "role": "system",
@@ -1349,7 +1483,7 @@ class AI(Tiku):
                 model=self.model,
                 messages=_make_messages(
                     "本题为单选题，你只能选择一个选项，请根据题目和选项回答问题，以json格式输出正确的选项内容，示例回答：{\"Answer\": [\"答案\"]}。除此之外不要输出任何多余的内容，也不要使用MD语法。如果你使用了互联网搜索，也请不要返回搜索的结果和参考资料",
-                    f"题目：{q_info['title']}\n选项：{options}"
+                    question_content
                 )
             ))
         elif q_info['type'] == 'multiple':
@@ -1357,7 +1491,7 @@ class AI(Tiku):
                 model=self.model,
                 messages=_make_messages(
                     "本题为多选题，你必须选择两个或以上选项，请根据题目和选项回答问题，以json格式输出正确的选项内容，示例回答：{\"Answer\": [\"答案1\",\n\"答案2\",\n\"答案3\"]}。除此之外不要输出任何多余的内容，也不要使用MD语法。如果你使用了互联网搜索，也请不要返回搜索的结果和参考资料",
-                    f"题目：{q_info['title']}\n选项：{options}"
+                    question_content
                 )
             ))
         elif q_info['type'] == 'completion':
@@ -1365,7 +1499,7 @@ class AI(Tiku):
                 model=self.model,
                 messages=_make_messages(
                     "本题为填空题，你必须根据语境和相关知识填入合适的内容，请根据题目回答问题，以json格式输出正确的答案，示例回答：{\"Answer\": [\"答案\"]}。除此之外不要输出任何多余的内容，也不要使用MD语法。如果你使用了互联网搜索，也请不要返回搜索的结果和参考资料",
-                    f"题目：{q_info['title']}"
+                    question_content
                 )
             ))
         elif q_info['type'] == 'judgement':
@@ -1373,7 +1507,7 @@ class AI(Tiku):
                 model=self.model,
                 messages=_make_messages(
                     "本题为判断题，你只能回答正确或者错误，请根据题目回答问题，以json格式输出正确的答案，示例回答：{\"Answer\": [\"正确\"]}。除此之外不要输出任何多余的内容，也不要使用MD语法。如果你使用了互联网搜索，也请不要返回搜索的结果和参考资料",
-                    f"题目：{q_info['title']}"
+                    question_content
                 )
             ))
         else:
@@ -1381,7 +1515,7 @@ class AI(Tiku):
                 model=self.model,
                 messages=_make_messages(
                     "本题为简答题，你必须根据语境和相关知识填入合适的内容，请根据题目回答问题，以json格式输出正确的答案，示例回答：{\"Answer\": [\"这是我的答案\"]}。除此之外不要输出任何多余的内容，也不要使用MD语法。如果你使用了互联网搜索，也请不要返回搜索的结果和参考资料",
-                    f"题目：{q_info['title']}"
+                    question_content
                 )
             ))
 
@@ -1389,6 +1523,12 @@ class AI(Tiku):
         try:
             answer_text = message_answer_text(completion.choices[0].message)
             response = json.loads(remove_md_json_wrapper(answer_text))
+            if image_choice:
+                values = response.get('Answer')
+                if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+                    return None
+                selected = _choice_letters('\n'.join(values), q_info)
+                return '\n'.join(selected) if selected else None
             sep = "\n"
             return sep.join(response['Answer']).strip()
         except Exception as e:
@@ -1506,6 +1646,10 @@ class SiliconFlow(Tiku):
             "Content-Type": "application/json"
         }
 
+        question_content, has_images = _multimodal_content(
+            f"题目：{q_info['title']}\n选项：{q_info['options']}"
+        )
+
         # 构造系统提示词
         system_prompt = ""
         if q_info['type'] == "single":
@@ -1517,6 +1661,18 @@ class SiliconFlow(Tiku):
         elif q_info['type'] == 'judgement':
             system_prompt = "本题为判断题，请回答'正确'或'错误'，以JSON格式输出：示例回答：{\"Answer\": [\"正确\"]}。除此之外不要输出任何多余的内容，也不要使用MD语法。如果你使用了互联网搜索，也请不要返回搜索的结果和参考资料"
 
+        if has_images:
+            system_prompt += (
+                "\n题干或选项包含图片。请识别图片中的文字、公式和图形信息后再作答，"
+                "如果无法可靠识别，请返回 {\"Answer\": []}，不要猜测。"
+            )
+        if _image_choice(q_info):
+            system_prompt = (
+                '根据题干和各选项字母后紧随的图片作答。单选只选择一个字母，多选选择所有正确字母。'
+                '只输出 JSON，例如 {"Answer":["B"]} 或 {"Answer":["A","C"]}。'
+                '不要返回公式或选项正文。如果无法判断，返回 {"Answer":[]}。'
+            )
+
         # 构造请求体
         payload = {
             "model": self.model_name,
@@ -1527,7 +1683,7 @@ class SiliconFlow(Tiku):
                 },
                 {
                     "role": "user",
-                    "content": f"题目：{q_info['title']}\n选项：{q_info['options']}"
+                    "content": question_content
                 }
             ],
             "stream": False,
@@ -1554,6 +1710,12 @@ class SiliconFlow(Tiku):
                 result = response.json()
                 content = result['choices'][0]['message']['content']
                 parsed = json.loads(remove_md_json_wrapper(content))
+                if _image_choice(q_info):
+                    values = parsed.get('Answer')
+                    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+                        return None
+                    selected = _choice_letters('\n'.join(values), q_info)
+                    return '\n'.join(selected) if selected else None
                 return "\n".join(parsed['Answer']).strip()
             else:
                 logger.error(f"API请求失败：{response.status_code} {response.text}")

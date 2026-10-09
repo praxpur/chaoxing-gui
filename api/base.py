@@ -18,7 +18,7 @@ from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception
 from tqdm import tqdm
 
-from api.answer import Tiku, TikuManual
+from api.answer import Tiku, TikuManual, _image_choice, _choice_letters
 from api.answer_check import cut
 from api.cipher import AESCipher
 from api.config import GlobalConst as gc
@@ -1102,10 +1102,22 @@ class Chaoxing:
                 answers = list(answers) + [None] * (total_questions - len(answers))
                 answers = answers[:total_questions]
 
+            unresolved_image_choice = False
             for q, res in zip(questions["questions"], answers):
                 logger.debug(f"当前题目信息 -> {q}")
                 answer = ""
-                if not res:
+                if _image_choice(q):
+                    # 图像中的公式正文不能与 img 标签做子序列/相似度匹配。
+                    answer = _choice_letters(res, q)
+                    if answer:
+                        q[f'answerSource{q["id"]}'] = "cover"
+                        found_answers += 1
+                        logger.info("图片选择题选项匹配成功：{}", answer)
+                    else:
+                        q[f'answerSource{q["id"]}'] = "unresolved"
+                        unresolved_image_choice = True
+                        logger.warning("图片选择题无有效选项字母，留空并仅保存，需人工检查")
+                elif not res:
                     # 随机答题
                     answer = random_answer(q["options"], q["type"])
                     q[f'answerSource{q["id"]}'] = "random"
@@ -1175,7 +1187,7 @@ class Chaoxing:
                         getattr(p, 'is_manual', False) or p.__class__.__name__ == 'TikuManual' for p in
                         getattr(self.tiku, 'providers', [])))
             )
-            if self.tiku.get_submit_params() == "1":
+            if unresolved_image_choice or self.tiku.get_submit_params() == "1":
                 questions["pyFlag"] = "1"
             elif is_manual_mode or cover_rate >= self.tiku.COVER_RATE * 100 or self.rollback_times >= 1:
                 questions["pyFlag"] = ""
