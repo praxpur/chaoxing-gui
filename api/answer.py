@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from re import sub
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 import requests
@@ -111,7 +111,12 @@ def _image_data_url(image_url: str) -> Optional[str]:
             return None
 
     parsed = urlparse(image_url)
-    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+    if parsed.scheme == 'http':
+        # Chaoxing pages may embed HTTP image URLs; upgrade before any request
+        # so credentials are never sent over an unencrypted connection.
+        parsed = parsed._replace(scheme='https')
+        image_url = urlunparse(parsed)
+    if parsed.scheme != 'https' or not parsed.hostname:
         logger.warning("题目图片地址不可用，将跳过该图片")
         return None
 
@@ -120,8 +125,6 @@ def _image_data_url(image_url: str) -> Optional[str]:
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     }
     candidate_urls = [image_url]
-    if image_url.lower().startswith("http://"):
-        candidate_urls.append("https://" + image_url[7:])
 
     last_error = None
     for candidate_url in candidate_urls:
@@ -133,7 +136,7 @@ def _image_data_url(image_url: str) -> Optional[str]:
             # the domain-scoped cookie jar.
             for _ in range(4):
                 parsed = urlparse(current_url)
-                if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+                if parsed.scheme != 'https' or not parsed.hostname:
                     raise ValueError("unsupported image redirect URL")
                 is_chaoxing = _is_chaoxing_host(parsed.hostname)
                 if is_chaoxing and cookie_jar is None:

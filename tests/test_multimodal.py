@@ -83,6 +83,24 @@ class MultimodalContentTestCase(unittest.TestCase):
                 self.assertEqual(prepared.headers.get("Cookie"), expected)
 
     @patch("api.cookies.use_cookies", return_value={"session": "secret"})
+    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    def test_http_image_is_upgraded_before_request(self, get, _cookies):
+        result = answer._image_data_url("http://p.ananas.chaoxing.com/q.png")
+
+        self.assertTrue(result.startswith("data:image/png;base64,"))
+        self.assertEqual(get.call_args.args[0], "https://p.ananas.chaoxing.com/q.png")
+
+    @patch("api.answer.requests.get")
+    def test_http_redirect_is_rejected_without_followup_request(self, get):
+        get.return_value = SimpleNamespace(
+            status_code=302,
+            headers={"Location": "http://external.test/q.png"},
+        )
+
+        self.assertIsNone(answer._image_data_url("https://p.ananas.chaoxing.com/q.png"))
+        get.assert_called_once()
+
+    @patch("api.cookies.use_cookies", return_value={"session": "secret"})
     @patch("api.answer.requests.get")
     def test_redirect_to_external_host_drops_cookies(self, get, _cookies):
         """A redirect from Chaoxing to another host must not carry cookies."""
