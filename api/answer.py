@@ -2,16 +2,19 @@ import configparser
 import base64
 import html
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
 import random
 import re
 import shutil
+import socket
 import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from pathlib import Path
 from re import sub
 from typing import Optional
@@ -79,6 +82,60 @@ def _question_cache_key(q_info: dict) -> str:
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
+def _public_image_address(hostname: str, port: int) -> str:
+    """Resolve once, reject non-public results, and return a numeric address."""
+    try:
+        try:
+            addresses = [ipaddress.ip_address(hostname)]
+        except ValueError:
+            records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+            addresses = [ipaddress.ip_address(record[4][0]) for record in records]
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot resolve image destination") from exc
+    if not addresses:
+        raise ValueError("image destination has no addresses")
+    for address in addresses:
+        if not address.is_global or address.is_multicast:
+            raise ValueError("image destination is not public")
+        if isinstance(address, ipaddress.IPv6Address):
+            # Transition addresses can tunnel to non-public IPv4 destinations.
+            if address.sixtofour or address.teredo or address in ipaddress.ip_network('64:ff9b::/96'):
+                raise ValueError("image destination uses an IPv6 transition address")
+    # Prefer IPv4 when available; do not resolve the hostname again to connect.
+    return str(next((address for address in addresses if address.version == 4), addresses[0]))
+
+
+class _PublicImageAdapter(requests.adapters.HTTPAdapter):
+    """Pin HTTPS connections to public IPs while retaining hostname TLS checks."""
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        """Validate this hop and use its numeric IP for the connection pool."""
+        parsed = urlparse(request.url)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("unsupported image destination")
+        if verify is False or any((proxies or {}).values()):
+            raise ValueError("image downloads require direct verified HTTPS")
+        port = parsed.port or 443
+        address = _public_image_address(parsed.hostname, port)
+        host_params, pool_kwargs = self.build_connection_pool_key_attributes(request, verify, cert)
+        host_params['host'] = address
+        pool_kwargs.update(server_hostname=parsed.hostname, assert_hostname=parsed.hostname)
+        request.headers['Host'] = parsed.netloc
+        return self.poolmanager.connection_from_host(**host_params, pool_kwargs=pool_kwargs)
+
+
+@contextmanager
+def _get_image_response(url: str, **kwargs):
+    """Keep the pinned session and streaming response open until the hop ends."""
+    with requests.Session() as session:
+        # Proxies could resolve the original hostname again and bypass pinning.
+        # Also disable implicit netrc credentials for untrusted image URLs.
+        session.trust_env = False
+        session.mount('https://', _PublicImageAdapter())
+        with session.get(url, **kwargs) as response:
+            yield response
+
+
 def _is_chaoxing_host(hostname: Optional[str]) -> bool:
     """Return whether a hostname belongs to chaoxing.com."""
     host = (hostname or '').rstrip('.').lower()
@@ -128,6 +185,7 @@ def _image_data_url(image_url: str) -> Optional[str]:
     base_headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Encoding": "identity",
     }
     candidate_urls = [image_url]
 
@@ -150,33 +208,44 @@ def _image_data_url(image_url: str) -> Optional[str]:
                 headers = dict(base_headers)
                 if is_chaoxing:
                     headers["Referer"] = "https://mooc1.chaoxing.com/"
-                response = requests.get(
+                with _get_image_response(
                     current_url,
                     headers=headers,
                     cookies=cookie_jar if is_chaoxing else None,
                     timeout=15,
                     allow_redirects=False,
-                )
-                if 300 <= response.status_code < 400:
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise ValueError("image redirect has no location")
-                    current_url = urljoin(current_url, location)
-                    continue
+                    stream=True,
+                ) as response:
+                    if 300 <= response.status_code < 400:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError("image redirect has no location")
+                        current_url = urljoin(current_url, location)
+                        continue
 
-                response.raise_for_status()
-                content_type_header = response.headers.get("Content-Type", "")
-                content_types = [part.strip().lower() for part in re.split(r"[,;]", content_type_header)]
-                content_type = next((part for part in content_types if part.startswith("image/")), "")
-                if not content_type:
-                    guessed_type = mimetypes.guess_type(current_url)[0] or ""
-                    content_type = guessed_type.lower() if guessed_type.startswith("image/") else ""
-                if not content_type.startswith("image/"):
-                    raise ValueError("image response is not an image")
-                if not response.content or len(response.content) > _MAX_IMAGE_BYTES:
-                    raise ValueError("image exceeds size limit")
-                encoded = base64.b64encode(response.content).decode("ascii")
-                return f"data:{content_type};base64,{encoded}"
+                    response.raise_for_status()
+                    content_type_header = response.headers.get("Content-Type", "")
+                    content_types = [part.strip().lower() for part in re.split(r"[,;]", content_type_header)]
+                    content_type = next((part for part in content_types if part.startswith("image/")), "")
+                    if not content_type:
+                        guessed_type = mimetypes.guess_type(current_url)[0] or ""
+                        content_type = guessed_type.lower() if guessed_type.startswith("image/") else ""
+                    if not content_type.startswith("image/"):
+                        raise ValueError("image response is not an image")
+                    if response.headers.get('Content-Encoding', '').lower() not in {'', 'identity'}:
+                        raise ValueError("compressed image response is unsupported")
+                    size_header = response.headers.get('Content-Length', '')
+                    if size_header.isdigit() and int(size_header) > _MAX_IMAGE_BYTES:
+                        raise ValueError("image exceeds size limit")
+                    content = bytearray()
+                    for chunk in response.iter_content(chunk_size=64 * 1024):
+                        if len(content) + len(chunk) > _MAX_IMAGE_BYTES:
+                            raise ValueError("image exceeds size limit")
+                        content.extend(chunk)
+                    if not content:
+                        raise ValueError("image is empty")
+                    encoded = base64.b64encode(content).decode("ascii")
+                    return f"data:{content_type};base64,{encoded}"
             raise ValueError("too many image redirects")
         except (requests.RequestException, ValueError) as exc:
             last_error = exc

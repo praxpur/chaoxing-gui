@@ -18,16 +18,29 @@ from api.decode import _extract_choices  # noqa: E402
 
 
 class _ImageResponse:
-    status_code = 200
-    content = b"fake-png-content"
-    headers = {"Content-Type": "image/png"}
+    def __init__(self, status_code=200, headers=None, chunks=None):
+        self.status_code = status_code
+        self.headers = headers or {"Content-Type": "image/png"}
+        self.chunks = list(chunks if chunks is not None else [b"fake-png-content"])
+        self.closed = False
+        self.iterated = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.closed = True
+
+    def iter_content(self, chunk_size=None):
+        self.iterated = True
+        yield from self.chunks
 
     def raise_for_status(self):
         return None
 
 
 class MultimodalContentTestCase(unittest.TestCase):
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_image_html_becomes_data_url_parts(self, _get):
         content, has_images, images_available = answer._multimodal_content(
             '题目：函数图像<img src="http://example.test/q.png">\n选项：A'
@@ -40,7 +53,7 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertEqual(content[1]["type"], "image_url")
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
 
-    @patch("api.answer.requests.get")
+    @patch("api.answer._get_image_response")
     def test_mixed_content_type_header_finds_image_mime(self, get):
         response = _ImageResponse()
         response.headers = {"Content-Type": "application/octet-stream, image/jpeg;charset=UTF-8"}
@@ -65,7 +78,7 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertIn("A", choice)
         self.assertIn('<img src="http://example.test/a.png">', choice)
 
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_external_image_request_has_no_session_cookies(self, get):
         result = answer._image_data_url("https://example.test/q.png")
 
@@ -74,7 +87,7 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertNotIn("Referer", get.call_args.kwargs["headers"])
 
     @patch("api.cookies.use_cookies", return_value={"session": "secret"})
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_chaoxing_request_uses_scoped_cookie_jar(self, get, _cookies):
         result = answer._image_data_url("https://p.ananas.chaoxing.com/q.png")
 
@@ -93,7 +106,7 @@ class MultimodalContentTestCase(unittest.TestCase):
                 self.assertEqual(prepared.headers.get("Cookie"), expected)
 
     @patch("api.cookies.use_cookies", return_value={"session": "secret"})
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_http_image_is_upgraded_before_request(self, get, _cookies):
         result = answer._image_data_url("http://p.ananas.chaoxing.com/q.png")
 
@@ -101,7 +114,7 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertEqual(get.call_args.args[0], "https://p.ananas.chaoxing.com/q.png")
 
     @patch("api.cookies.use_cookies", return_value={"session": "secret"})
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_relative_formula_image_uses_https_work_origin(self, get, _cookies):
         """Resolve quiz formula paths before validating the scheme and cookies."""
         result = answer._image_data_url("/ananas/latex/p/test-formula")
@@ -111,7 +124,7 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertEqual(list(get.call_args.kwargs["cookies"])[0].domain, ".chaoxing.com")
 
     @patch("api.cookies.use_cookies")
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_protocol_relative_external_image_has_no_cookies(self, get, cookies):
         """Resolving protocol-relative URLs must retain the off-origin boundary."""
         result = answer._image_data_url("//external.test/q.png")
@@ -121,22 +134,21 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertIsNone(get.call_args.kwargs["cookies"])
         cookies.assert_not_called()
 
-    @patch("api.answer.requests.get")
+    @patch("api.answer._get_image_response")
     def test_http_redirect_is_rejected_without_followup_request(self, get):
-        get.return_value = SimpleNamespace(
-            status_code=302,
-            headers={"Location": "http://external.test/q.png"},
+        get.return_value = _ImageResponse(
+            status_code=302, headers={"Location": "http://external.test/q.png"}
         )
 
         self.assertIsNone(answer._image_data_url("https://p.ananas.chaoxing.com/q.png"))
         get.assert_called_once()
 
     @patch("api.cookies.use_cookies", return_value={"session": "secret"})
-    @patch("api.answer.requests.get")
+    @patch("api.answer._get_image_response")
     def test_redirect_to_external_host_drops_cookies(self, get, _cookies):
         """A redirect from Chaoxing to another host must not carry cookies."""
         get.side_effect = [
-            SimpleNamespace(status_code=302, headers={"Location": "https://external.test/q.png"}),
+            _ImageResponse(status_code=302, headers={"Location": "https://external.test/q.png"}),
             _ImageResponse(),
         ]
 
@@ -149,7 +161,7 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertFalse(second.kwargs["allow_redirects"])
 
     @patch("api.cookies.use_cookies")
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_spoofed_chaoxing_hosts_never_load_cookies(self, get, cookies):
         """A hostname containing the domain is not sufficient for authentication."""
         for host in ("chaoxing.com.external.test", "fakechaoxing.com"):
@@ -159,14 +171,14 @@ class MultimodalContentTestCase(unittest.TestCase):
         cookies.assert_not_called()
 
     @patch("api.answer._MAX_IMAGE_BYTES", 4)
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     def test_oversized_image_is_unavailable(self, _get):
         """Oversized downloads and inline images must never pass through as URLs."""
         self.assertIsNone(answer._image_data_url("https://example.test/q.png"))
         self.assertIsNone(answer._image_data_url("data:image/png;base64,YWJjZGU="))
 
     @patch("api.cookies.use_cookies", return_value={"session": "secret"})
-    @patch("api.answer.requests.get", side_effect=requests.RequestException("403"))
+    @patch("api.answer._get_image_response", side_effect=requests.RequestException("403"))
     def test_unavailable_image_is_not_passed_to_model(self, _get, _cookies):
         content, has_images, images_available = answer._multimodal_content(
             '题目<img src="https://p.ananas.chaoxing.com/q.png">'
@@ -175,6 +187,58 @@ class MultimodalContentTestCase(unittest.TestCase):
         self.assertTrue(has_images)
         self.assertFalse(images_available)
         self.assertFalse(any(part["type"] == "image_url" for part in content))
+
+
+class ImageDownloadSecurityTestCase(unittest.TestCase):
+    def test_private_and_special_addresses_are_rejected(self):
+        for host in (
+            "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
+            "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1",
+            "::1", "fc00::1", "fe80::1",
+        ):
+            with self.subTest(host=host):
+                with self.assertRaises(ValueError):
+                    answer._public_image_address(host, 443)
+
+    def test_dns_results_are_all_checked_before_selecting_an_address(self):
+        records = [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+            (2, 1, 6, "", ("192.168.1.20", 443)),
+        ]
+        with patch("api.answer.socket.getaddrinfo", return_value=records):
+            with self.assertRaises(ValueError):
+                answer._public_image_address("image.example", 443)
+
+    def test_adapter_pins_numeric_address_and_keeps_tls_hostname(self):
+        request = requests.Request("GET", "https://image.example/path").prepare()
+        adapter = answer._PublicImageAdapter()
+        with patch("api.answer._public_image_address", return_value="93.184.216.34") as resolve:
+            pool = adapter.get_connection_with_tls_context(request, True, proxies={})
+
+        resolve.assert_called_once_with("image.example", 443)
+        self.assertEqual(pool.host, "93.184.216.34")
+        self.assertEqual(pool.assert_hostname, "image.example")
+        self.assertEqual(pool.conn_kw["server_hostname"], "image.example")
+        self.assertEqual(request.headers["Host"], "image.example")
+
+    @patch("api.answer._MAX_IMAGE_BYTES", 4)
+    def test_streaming_download_stops_before_buffering_past_limit(self):
+        response = _ImageResponse(chunks=[b"abc", b"de", b"never-read"])
+        with patch("api.answer._get_image_response", return_value=response):
+            self.assertIsNone(answer._image_data_url("https://image.example/q.png"))
+        self.assertTrue(response.closed)
+        self.assertTrue(response.iterated)
+
+    @patch("api.answer._MAX_IMAGE_BYTES", 4)
+    def test_content_length_limit_avoids_reading_body(self):
+        response = _ImageResponse(
+            headers={"Content-Type": "image/png", "Content-Length": "5"},
+            chunks=[b"never-read"],
+        )
+        with patch("api.answer._get_image_response", return_value=response):
+            self.assertIsNone(answer._image_data_url("https://image.example/q.png"))
+        self.assertTrue(response.closed)
+        self.assertFalse(response.iterated)
 
 
 class AIRequestTestCase(unittest.TestCase):
@@ -199,7 +263,7 @@ class AIRequestTestCase(unittest.TestCase):
             client.return_value.chat.completions.create.assert_not_called()
             post.assert_not_called()
 
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     @patch("api.answer.OpenAI")
     def test_ai_sends_multimodal_user_content(self, openai_cls, _get):
         captured = {}
@@ -230,7 +294,7 @@ class AIRequestTestCase(unittest.TestCase):
         self.assertIsInstance(user_message["content"], list)
         self.assertTrue(any(part["type"] == "image_url" for part in user_message["content"]))
 
-    @patch("api.answer.requests.get", return_value=_ImageResponse())
+    @patch("api.answer._get_image_response", return_value=_ImageResponse())
     @patch("api.answer.OpenAI")
     def test_image_choice_requests_and_returns_option_letter(self, openai_cls, _get):
         captured = {}
