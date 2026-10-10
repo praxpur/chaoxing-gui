@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bs4 import BeautifulSoup  # noqa: E402
 
 from api import answer  # noqa: E402
-from api.base import Chaoxing, StudyResult  # noqa: E402
+from api.base import Chaoxing, StudyResult, _strict_judgement_answer  # noqa: E402
 from api.decode import _extract_choices  # noqa: E402
 
 
@@ -346,6 +346,50 @@ class AIRequestTestCase(unittest.TestCase):
 
 
 class ImageSubmissionTestCase(unittest.TestCase):
+    def test_strict_judgement_keeps_recognized_values(self):
+        tiku = SimpleNamespace(true_list=[], false_list=[])
+        self.assertEqual(_strict_judgement_answer(tiku, "正确"), "true")
+        self.assertEqual(_strict_judgement_answer(tiku, "false"), "false")
+        self.assertEqual(_strict_judgement_answer(tiku, "无法判断"), "")
+
+    def test_unrecognized_image_judgement_is_saved_blank(self):
+        client = Chaoxing.__new__(Chaoxing)
+        client.kwargs = {}
+        client.rollback_times = 1
+        client.tiku = Mock(DISABLE=False, COVER_RATE=0, is_manual=False)
+        client.tiku.query_all.return_value = ["无法判断"]
+        client.tiku.get_submit_params.return_value = ""  # Submit enabled.
+        questions = {
+            "questions": [{
+                "id": "judgement-id",
+                "title": '<img src="https://example.test/q.png">',
+                "type": "judgement",
+                "options": "正确\n错误",
+                "answerField": {
+                    "answerjudgement-id": "0",
+                    "answertypejudgement-id": "0",
+                },
+            }],
+        }
+        session = Mock()
+        session.get.return_value = SimpleNamespace(status_code=200, text="test HTML")
+        session.post.return_value.status_code = 200
+        session.post.return_value.json.return_value = {"status": True, "msg": "saved"}
+        with patch("api.base.SessionManager.get_session", return_value=session), \
+                patch("api.base.decode_questions_info", return_value=questions), \
+                patch("api.base.random_answer") as random_answer:
+            result = client.study_work(
+                {"courseId": "test-course", "clazzId": "test-class"},
+                {"jobid": "work-test", "enc": "test-enc"},
+                {"knowledgeid": "test-chapter", "ktoken": "test-token", "cpi": "test-cpi"},
+            )
+
+        self.assertEqual(result, StudyResult.SUCCESS)
+        random_answer.assert_not_called()
+        data = session.post.call_args.kwargs["data"]
+        self.assertEqual(data["pyFlag"], "1")
+        self.assertEqual(data["answerjudgement-id"], "")
+
     def test_missing_image_answers_save_blank_without_random_fallback(self):
         """Choice and judgement images without answers must force save-only mode."""
         for question_type in ("single", "multiple", "judgement"):

@@ -280,6 +280,32 @@ def random_answer(options: str, q_type: str) -> str:
     return answer
 
 
+def _strict_judgement_answer(tiku, response) -> str:
+    """Return a recognized judgement value without invoking random fallback."""
+    if not isinstance(response, str):
+        return ""
+    value = response.strip().lower()
+    true_list = getattr(tiku, "true_list", [])
+    false_list = getattr(tiku, "false_list", [])
+    if not isinstance(true_list, (list, tuple, set)):
+        true_list = []
+    if not isinstance(false_list, (list, tuple, set)):
+        false_list = []
+    true_values = {
+        "true", "t", "1", "对", "正确", "√", "是", "yes", "y",
+        *(str(item).strip().lower() for item in true_list),
+    }
+    false_values = {
+        "false", "f", "0", "错", "错误", "×", "否", "no", "n", "不对", "不正确",
+        *(str(item).strip().lower() for item in false_list),
+    }
+    if value in true_values:
+        return "true"
+    if value in false_values:
+        return "false"
+    return ""
+
+
 def _parse_work_record_list(html_text: str) -> list[tuple[int, float]]:
     """
     解析章节检测作答记录列表页面（/work/record-list）。
@@ -1106,6 +1132,7 @@ class Chaoxing:
             for q, res in zip(questions["questions"], answers):
                 logger.debug(f"当前题目信息 -> {q}")
                 answer = ""
+                unresolved_question = False
                 if _image_choice(q):
                     # 图像中的公式正文不能与 img 标签做子序列/相似度匹配。
                     answer = _choice_letters(res, q)
@@ -1162,7 +1189,15 @@ class Chaoxing:
                             if not answer and t_res:
                                 answer = best_option_by_similarity(t_res[0], options_list, threshold=0.8)
                     elif q["type"] == "judgement":
-                        answer = "true" if self.tiku.judgement_select(res) else "false"
+                        if _has_image(q):
+                            answer = _strict_judgement_answer(self.tiku, res)
+                            if not answer:
+                                q[f'answerSource{q["id"]}'] = "unresolved"
+                                unresolved_image_choice = True
+                                unresolved_question = True
+                                logger.warning("图片判断题无有效答案，留空并仅保存，需人工检查")
+                        else:
+                            answer = "true" if self.tiku.judgement_select(res) else "false"
                     elif q["type"] == "completion":
                         if isinstance(res, list):
                             answer = "".join(res)
@@ -1172,7 +1207,7 @@ class Chaoxing:
                         # 其他类型直接使用答案 （目前仅知有简答题，待补充处理）
                         answer = res
 
-                    if not answer:  # 检查 answer 是否为空
+                    if not answer and not unresolved_question:  # 检查 answer 是否为空
                         logger.warning(f"找到答案但答案未能匹配 -> {res}\t随机选择答案")
                         answer = random_answer(q["options"], q["type"])  # 如果为空，则随机选择答案
                         q[f'answerSource{q["id"]}'] = "random"
