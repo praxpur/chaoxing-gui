@@ -52,7 +52,7 @@ def _image_choice(q_info: dict) -> bool:
 
 
 def _choice_letters(answer, q_info: dict) -> str:
-    """只接受明确的选项字母，禁止从公式或说明文字中猜测选项。"""
+    """只接受明确的选项字母，禁止从公式或说明文字中猜测选项."""
     if not isinstance(answer, str):
         return ''
     compact = re.sub(r'[\s,，、;；]+', '', answer).upper()
@@ -150,32 +150,93 @@ def _chaoxing_cookie_jar(cookies: dict) -> requests.cookies.RequestsCookieJar:
     return jar
 
 
+def _inline_image_data_url(image_url: str) -> Optional[str]:
+    if not image_url.lower().startswith("data:"):
+        return None
+    try:
+        header, encoded = image_url.split(',', 1)
+        if not header.lower().startswith('data:image/') or not header.lower().endswith(';base64'):
+            return None
+        if len(encoded) > ((_MAX_IMAGE_BYTES + 2) // 3) * 4:
+            return None
+        content = base64.b64decode(encoded, validate=True)
+        return image_url if content and len(content) <= _MAX_IMAGE_BYTES else None
+    except ValueError:
+        return None
+
+
+def _image_response_data_url(response, current_url: str) -> str:
+    response.raise_for_status()
+    content_type_header = response.headers.get("Content-Type", "")
+    content_types = [part.strip().lower() for part in re.split(r"[,;]", content_type_header)]
+    content_type = next((part for part in content_types if part.startswith("image/")), "")
+    if not content_type:
+        guessed_type = mimetypes.guess_type(current_url)[0] or ""
+        content_type = guessed_type.lower() if guessed_type.startswith("image/") else ""
+    if not content_type.startswith("image/"):
+        raise ValueError("image response is not an image")
+    if response.headers.get('Content-Encoding', '').lower() not in {'', 'identity'}:
+        raise ValueError("compressed image response is unsupported")
+    size_header = response.headers.get('Content-Length', '')
+    if size_header.isdigit() and int(size_header) > _MAX_IMAGE_BYTES:
+        raise ValueError("image exceeds size limit")
+    content = bytearray()
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if len(content) + len(chunk) > _MAX_IMAGE_BYTES:
+            raise ValueError("image exceeds size limit")
+        content.extend(chunk)
+    if not content:
+        raise ValueError("image is empty")
+    encoded = base64.b64encode(content).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
+
+
+def _download_image_candidate(image_url: str, base_headers: dict) -> str:
+    current_url = image_url
+    cookie_jar = None
+    for _ in range(4):
+        parsed = urlparse(current_url)
+        if parsed.scheme != 'https' or not parsed.hostname:
+            raise ValueError("unsupported image redirect URL")
+        is_chaoxing = _is_chaoxing_host(parsed.hostname)
+        if is_chaoxing and cookie_jar is None:
+            from api.cookies import use_cookies
+            cookie_jar = _chaoxing_cookie_jar(use_cookies())
+        headers = dict(base_headers)
+        if is_chaoxing:
+            headers["Referer"] = "https://mooc1.chaoxing.com/"
+        with _get_image_response(
+            current_url,
+            headers=headers,
+            cookies=cookie_jar if is_chaoxing else None,
+            timeout=15,
+            allow_redirects=False,
+            stream=True,
+        ) as response:
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError("image redirect has no location")
+                current_url = urljoin(current_url, location)
+                continue
+            return _image_response_data_url(response, current_url)
+    raise ValueError("too many image redirects")
+
+
 def _image_data_url(image_url: str) -> Optional[str]:
     """Download a question image without leaking session cookies off-origin."""
     image_url = html.unescape(image_url.strip())
     if not image_url:
         return None
-    if image_url.lower().startswith("data:"):
-        try:
-            header, encoded = image_url.split(',', 1)
-            if not header.lower().startswith('data:image/') or not header.lower().endswith(';base64'):
-                return None
-            if len(encoded) > ((_MAX_IMAGE_BYTES + 2) // 3) * 4:
-                return None
-            content = base64.b64decode(encoded, validate=True)
-            return image_url if content and len(content) <= _MAX_IMAGE_BYTES else None
-        except ValueError:
-            return None
+    inline_url = _inline_image_data_url(image_url)
+    if inline_url or image_url.lower().startswith("data:"):
+        return inline_url
 
     parsed = urlparse(image_url)
     if not parsed.scheme:
-        # Work-page formula images may use root-relative or protocol-relative
-        # URLs. Resolve them against the HTTPS origin that serves the quiz.
         image_url = urljoin('https://mooc1.chaoxing.com/', image_url)
         parsed = urlparse(image_url)
     if parsed.scheme == 'http':
-        # Chaoxing pages may embed HTTP image URLs; upgrade before any request
-        # so credentials are never sent over an unencrypted connection.
         parsed = parsed._replace(scheme='https')
         image_url = urlunparse(parsed)
     if parsed.scheme != 'https' or not parsed.hostname:
@@ -187,71 +248,11 @@ def _image_data_url(image_url: str) -> Optional[str]:
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         "Accept-Encoding": "identity",
     }
-    candidate_urls = [image_url]
-
-    last_error = None
-    for candidate_url in candidate_urls:
-        current_url = candidate_url
-        cookie_jar = None
-        try:
-            # Do not let requests automatically carry cookies across a redirect.
-            # Each hop is checked independently and only Chaoxing hosts receive
-            # the domain-scoped cookie jar.
-            for _ in range(4):
-                parsed = urlparse(current_url)
-                if parsed.scheme != 'https' or not parsed.hostname:
-                    raise ValueError("unsupported image redirect URL")
-                is_chaoxing = _is_chaoxing_host(parsed.hostname)
-                if is_chaoxing and cookie_jar is None:
-                    from api.cookies import use_cookies
-                    cookie_jar = _chaoxing_cookie_jar(use_cookies())
-                headers = dict(base_headers)
-                if is_chaoxing:
-                    headers["Referer"] = "https://mooc1.chaoxing.com/"
-                with _get_image_response(
-                    current_url,
-                    headers=headers,
-                    cookies=cookie_jar if is_chaoxing else None,
-                    timeout=15,
-                    allow_redirects=False,
-                    stream=True,
-                ) as response:
-                    if 300 <= response.status_code < 400:
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise ValueError("image redirect has no location")
-                        current_url = urljoin(current_url, location)
-                        continue
-
-                    response.raise_for_status()
-                    content_type_header = response.headers.get("Content-Type", "")
-                    content_types = [part.strip().lower() for part in re.split(r"[,;]", content_type_header)]
-                    content_type = next((part for part in content_types if part.startswith("image/")), "")
-                    if not content_type:
-                        guessed_type = mimetypes.guess_type(current_url)[0] or ""
-                        content_type = guessed_type.lower() if guessed_type.startswith("image/") else ""
-                    if not content_type.startswith("image/"):
-                        raise ValueError("image response is not an image")
-                    if response.headers.get('Content-Encoding', '').lower() not in {'', 'identity'}:
-                        raise ValueError("compressed image response is unsupported")
-                    size_header = response.headers.get('Content-Length', '')
-                    if size_header.isdigit() and int(size_header) > _MAX_IMAGE_BYTES:
-                        raise ValueError("image exceeds size limit")
-                    content = bytearray()
-                    for chunk in response.iter_content(chunk_size=64 * 1024):
-                        if len(content) + len(chunk) > _MAX_IMAGE_BYTES:
-                            raise ValueError("image exceeds size limit")
-                        content.extend(chunk)
-                    if not content:
-                        raise ValueError("image is empty")
-                    encoded = base64.b64encode(content).decode("ascii")
-                    return f"data:{content_type};base64,{encoded}"
-            raise ValueError("too many image redirects")
-        except (requests.RequestException, ValueError) as exc:
-            last_error = exc
-
-    logger.warning("题目图片不可用，将留空并保存: {}", type(last_error).__name__)
-    return None
+    try:
+        return _download_image_candidate(image_url, base_headers)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("题目图片不可用，将留空并保存: {}", type(exc).__name__)
+        return None
 
 
 def _multimodal_content(value: str) -> tuple[object, bool, bool]:

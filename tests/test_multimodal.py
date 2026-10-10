@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""多模态题目解析与 OpenAI 兼容请求回归测试。"""
+"""多模态题目解析与 OpenAI 兼容请求回归测试."""
 import os
 import sys
 import unittest
@@ -193,8 +193,8 @@ class ImageDownloadSecurityTestCase(unittest.TestCase):
     def test_private_and_special_addresses_are_rejected(self):
         for host in (
             "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
-            "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1",
-            "::1", "fc00::1", "fe80::1",
+            "169.254.169.254", "100.64.0.1", "224.0.0.1",
+            "::1", "fc00::1", "fe80::1", "255.255.255.255",
         ):
             with self.subTest(host=host):
                 with self.assertRaises(ValueError):
