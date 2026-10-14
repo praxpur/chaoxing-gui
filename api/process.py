@@ -8,14 +8,22 @@ from api.config import GlobalConst as gc
 SIGN_ACTIVITY_TYPES = {str(int(ActivityType.SIGNIN)), "sign"}
 
 # 签到接口返回纯文本: 成功是 success, 已经签到也算完成, 其余(距离限制、非本班学生等)按失败处理
-SIGN_SUCCESS_WORDS = ("success", "签到成功")
-SIGN_DONE_WORDS = ("已经签到", "已签到")
+# 用完整文本比对: 子串匹配会把 unsuccessful 判成 success
+SIGN_DONE_TEXTS = (
+    "success",
+    "successful",
+    "签到成功",
+    "已经签到",
+    "您已经签到",
+    "已签到",
+)
+SIGN_TEXT_PUNCT = ".!。！,，;； \t\r\n"
 
 
 def sign_succeeded(result) -> bool:
     """根据签到接口返回的文本判断签到是否完成."""
-    text = str(result or '').strip().lower()
-    return any(word in text for word in SIGN_SUCCESS_WORDS) or any(word in text for word in SIGN_DONE_WORDS)
+    text = str(result or '').strip().lower().strip(SIGN_TEXT_PUNCT)
+    return text in SIGN_DONE_TEXTS
 
 
 def sec2time(seconds: int) -> str:

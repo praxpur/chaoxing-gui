@@ -38,13 +38,14 @@ class PendingSignActivitiesTest(unittest.TestCase):
 
 class SignSucceededTest(unittest.TestCase):
     def test_success_text(self):
-        """成功文本大小写不敏感, 已签到同样视为完成."""
-        for text in ("success", "Success", "签到成功", "您已经签到", "已签到"):
+        """成功文本大小写与结尾标点不敏感, 已签到同样视为完成."""
+        for text in ("success", "Success", "success.", "签到成功！", "您已经签到", "已签到"):
             self.assertTrue(sign_succeeded(text), text)
 
     def test_failure_text(self):
-        """距离限制、非本班学生、空返回都不能算成功."""
-        for text in ("您当前位置距离签到地点有 500米", "签到失败", "非本班学生", "", None):
+        """距离限制、非本班学生、空返回和否定表述都不能算成功."""
+        for text in ("您当前位置距离签到地点有 500米", "签到失败", "非本班学生",
+                     "unsuccessful", "not success", "签到未成功", "", None):
             self.assertFalse(sign_succeeded(text), text)
 
 
