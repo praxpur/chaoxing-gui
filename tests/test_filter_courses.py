@@ -52,7 +52,7 @@ class FilterCoursesTest(unittest.TestCase):
             self.assertEqual(len(task), len(ALL_COURSE))
 
     def test_all_mixed_with_ids_raises(self):
-        """all 与具体ID混写时必须报错, 否则同列表里填错的ID会被全部课程静默吞掉."""
+        """显式 all / * 不能与具体ID混写, 否则同列表里填错的ID会被全部课程静默吞掉."""
         for items in (["all", "999999"], ["267844236", "*"]):
             with self.assertRaises(InputFormatError) as ctx:
                 filter_courses(ALL_COURSE, items)
