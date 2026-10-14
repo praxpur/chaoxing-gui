@@ -548,17 +548,22 @@ def filter_courses(all_course, course_list):
         except Exception as e:
             raise InputFormatError("输入格式错误") from e
 
-    # 学习全部课程需要显式声明 all / *, 避免配置写错时扩大刷课范围
-    if any(item in ("all", "*") for item in course_list):
-        logger.info("已显式指定学习全部课程")
-        return _dedupe_courses(all_course)
-
     course_list = [str(item).strip() for item in course_list if str(item).strip()]
     if not course_list:
         raise InputFormatError(
             "未指定要学习的课程。请填写课程ID, 或使用 course_list = all 学习全部课程。\n"
             + _format_course_list(all_course)
         )
+
+    # 学习全部课程需要显式声明 all / *, 避免配置写错时扩大刷课范围
+    if any(item in ("all", "*") for item in course_list):
+        # all / * 只允许单独出现, 否则同列表里的错误课程ID会被一并吞掉、不报错
+        if len(course_list) > 1:
+            raise InputFormatError(
+                f"all / * 表示全部课程, 不能和课程ID混写: {', '.join(course_list)}"
+            )
+        logger.info("已显式指定学习全部课程")
+        return _dedupe_courses(all_course)
 
     # 筛选需要学习的课程
     wanted = set(course_list)
