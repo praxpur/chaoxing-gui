@@ -72,6 +72,18 @@ class AIQueryTest(unittest.TestCase):
         msg = SimpleNamespace(content='抱歉，我无法回答', reasoning_content=None)
         self.assertIsNone(self._run(msg))
 
+    def test_unparsable_response_is_not_logged(self):
+        """模型输出可能带有题干与个人信息, 解析失败只记异常类型和长度."""
+        msg = SimpleNamespace(content='抱歉，无法作答，题干含考生张三', reasoning_content=None)
+        with mock.patch('api.answer.logger') as fake_logger:
+            self.assertIsNone(self._run(msg))
+        logged = ' '.join(
+            str(arg) for call in fake_logger.error.call_args_list for arg in call.args
+        )
+        self.assertIn('JSONDecodeError', logged)
+        self.assertIn('长度', logged)
+        self.assertNotIn('张三', logged)
+
 
 if __name__ == '__main__':
     unittest.main()

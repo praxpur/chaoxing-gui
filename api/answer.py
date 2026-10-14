@@ -1330,8 +1330,9 @@ class AI(Tiku):
             sep = "\n"
             return sep.join(response['Answer']).strip()
         except Exception as e:
+            # 只记长度不记原文: 模型输出里可能带有题干与个人信息, 长度足以区分空响应和格式不符
             logger.error(
-                f"无法解析大模型输出内容：{type(e).__name__}: {e}; 原始返回：{answer_text[:120]!r}"
+                f"无法解析大模型输出内容: {type(e).__name__}: {e}; 待解析文本长度 {len(answer_text)} 字符"
             )
             return None
 
