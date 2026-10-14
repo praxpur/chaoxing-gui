@@ -7,6 +7,16 @@ from api.config import GlobalConst as gc
 # 签到活动类型: 活动列表接口的 activeType 在不同接口版本里可能是数字或字符串
 SIGN_ACTIVITY_TYPES = {str(int(ActivityType.SIGNIN)), "sign"}
 
+# 签到接口返回纯文本: 成功是 success, 已经签到也算完成, 其余(距离限制、非本班学生等)按失败处理
+SIGN_SUCCESS_WORDS = ("success", "签到成功")
+SIGN_DONE_WORDS = ("已经签到", "已签到")
+
+
+def sign_succeeded(result) -> bool:
+    """根据签到接口返回的文本判断签到是否完成."""
+    text = str(result or '').strip().lower()
+    return any(word in text for word in SIGN_SUCCESS_WORDS) or any(word in text for word in SIGN_DONE_WORDS)
+
 
 def sec2time(seconds: int) -> str:
     """
@@ -156,8 +166,12 @@ def sign_in_course(chaoxing, course) -> int:
         except Exception as e:
             logger.error(f"课程 [{course['title']}] 签到异常: {type(e).__name__}: {e}")
             continue
-        signed += 1
-        logger.info(f"课程 [{course['title']}] 签到返回: {result}")
+        # pre_sign / sign_in_normal 对非 200 只记日志不抛异常, 所以要看返回文本
+        if sign_succeeded(result):
+            signed += 1
+            logger.info(f"课程 [{course['title']}] 签到完成: {result}")
+        else:
+            logger.warning(f"课程 [{course['title']}] 签到未成功, 服务端返回: {result}")
 
     return signed
 
