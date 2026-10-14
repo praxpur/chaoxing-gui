@@ -56,7 +56,7 @@ class AIQueryTest(unittest.TestCase):
             return _make_ai()._query(self.Q_INFO)
 
     def test_reasoning_only_response_is_parsed(self):
-        """thinking 模式正文为空时, 旧代码只会报「无法解析大模型输出内容」并返回 None."""
+        """思考模式正文为空时, 旧代码只会报「无法解析大模型输出内容」并返回 None."""
         msg = SimpleNamespace(content=None, reasoning_content=ANSWER_JSON)
         self.assertEqual(self._run(msg), '光合作用')
 
