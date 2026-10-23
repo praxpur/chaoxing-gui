@@ -84,6 +84,26 @@ class VideoProgressTest(unittest.TestCase):
                 self.assertEqual(self._study(), StudyResult.SUCCESS)
                 self.assertEqual(self.chaoxing.video_progress_log.call_args.args[6], expected_seconds)
 
+    def test_recovery_reports_reset_position_after_an_earlier_successful_report(self):
+        """已有上报记录时，403 恢复后也应立即上报重置后的续播位置"""
+        for position_ms in (0, 663000):
+            with self.subTest(position_ms=position_ms):
+                self.job["playTime"] = 120000
+                report = Mock(side_effect=[(False, 200), (False, 403), (True, 200)])
+                self.chaoxing.video_progress_log = report
+                recover = Mock(return_value={
+                    "dtoken": "refreshed-token", "duration": 663, "playTime": position_ms,
+                })
+                self.chaoxing._recover_after_forbidden = recover
+
+                self.assertEqual(self._study(), StudyResult.SUCCESS)
+                recover.assert_called_once_with(self.session, self.job, "Video")
+                self.assertEqual(report.call_count, 3)
+                self.assertEqual(report.call_args_list[0].args[6], 120)
+                self.assertGreaterEqual(report.call_args_list[1].args[6], 150)
+                self.assertEqual(report.call_args_list[2].args[4], "refreshed-token")
+                self.assertEqual(report.call_args_list[2].args[6], 0)
+
     def test_unpassed_card_at_end_remains_a_pending_job(self):
         html = 'mArg={"attachments":[{"type":"video","job":true,"mid":"test-mid",'
         html += '"isPassed":false,"playTime":663000,"headOffset":663000,'

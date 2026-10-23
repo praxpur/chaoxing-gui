@@ -946,6 +946,7 @@ class Chaoxing:
                             refreshed_play_time = refreshed_meta.get("playTime")
                             if refreshed_play_time is not None:
                                 play_time = self._get_video_resume_time_seconds(refreshed_play_time, duration)
+                            last_log_time = None
 
                             logger.debug("刷新视频状态后，总时长: {}s，续播位置: {}s", duration, play_time)
                             pbar = self._close_pbar_safe(pbar)
