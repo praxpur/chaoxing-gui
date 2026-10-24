@@ -9,12 +9,12 @@ from api.cxsecret_font import FontHashDAO
 class ResourceTest(unittest.TestCase):
     def test_font_mapping_loads_outside_repository(self):
         previous = os.getcwd()
-        try:
-            with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory:
+            try:
                 os.chdir(directory)
                 FontHashDAO()
-        finally:
-            os.chdir(previous)
+            finally:
+                os.chdir(previous)
 
     def test_user_installation_resources_load_outside_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
