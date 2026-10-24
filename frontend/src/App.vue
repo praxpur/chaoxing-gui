@@ -42,6 +42,10 @@
                   <el-form-item label="登录密码">
                     <el-input v-model="config.common.password" type="password" show-password placeholder="请输入密码"></el-input>
                   </el-form-item>
+                  <el-form-item label="使用 Cookie 登录">
+                    <el-switch v-model="config.common.use_cookies" />
+                    <div class="field-hint">开启后忽略账号密码，从程序目录下的 cookies.txt 读取登录状态</div>
+                  </el-form-item>
                   <el-form-item label="播放倍速">
                     <el-slider v-model="config.common.speed" :min="1" :max="2" :step="0.1" show-input></el-slider>
                   </el-form-item>
@@ -54,8 +58,30 @@
                       <el-radio value="continue">跳过(继续)</el-radio>
                     </el-radio-group>
                   </el-form-item>
+                  <el-form-item label="失败重试间隔(秒)">
+                    <el-input-number v-model="config.common.retry_interval" :min="0.1" :max="60" :step="0.1" :precision="1"></el-input-number>
+                  </el-form-item>
+                  <el-form-item label="自动签到">
+                    <el-switch v-model="config.common.auto_sign" />
+                    <div class="field-hint">刷课前先完成各课程当前进行中的签到；位置签到仍会由服务端校验距离</div>
+                  </el-form-item>
+                  <el-form-item label="章节检测答错重做">
+                    <el-switch v-model="config.common.work_redo_enabled" />
+                    <div class="field-hint">关闭时只检查并记录成绩，仅适合允许作答一次的课程</div>
+                  </el-form-item>
+                  <el-form-item label="最大重做次数" v-if="config.common.work_redo_enabled">
+                    <el-input-number v-model="config.common.work_max_retries" :min="1" :max="10"></el-input-number>
+                  </el-form-item>
                   <el-form-item label="自动增加学习次数">
                     <el-switch v-model="config.common.add_learning_count" />
+                    <div class="field-hint">刷课任务全部完成后，轮询访问章节把学习次数补到目标值</div>
+                  </el-form-item>
+                  <el-form-item label="目标学习次数" v-if="config.common.add_learning_count">
+                    <el-input-number v-model="config.common.target_count" :min="1" :max="1000"></el-input-number>
+                  </el-form-item>
+                  <el-form-item label="详细日志(TRACE)">
+                    <el-switch v-model="config.common.verbose" />
+                    <div class="field-hint">开启后控制台会输出更细粒度的调试信息，排查问题用</div>
                   </el-form-item>
                 </el-form>
               </el-tab-pane>
@@ -75,14 +101,23 @@
                     style="margin: 0 0 18px 150px; width: calc(100% - 150px);"
                   />
                   <el-form-item label="题库引擎提供商">
-                    <el-select v-model="config.tiku.provider" placeholder="请选择引擎" style="width: 100%">
+                    <el-select
+                      v-model="tikuProviders"
+                      multiple
+                      collapse-tags
+                      collapse-tags-tooltip
+                      placeholder="请选择引擎，可多选作为回退链"
+                      style="width: 100%"
+                    >
                       <el-option label="TikuYanxi (言溪)" value="TikuYanxi" />
                       <el-option label="TikuLike (LIKE)" value="TikuLike" />
+                      <el-option label="TikuAdapter (自建适配器)" value="TikuAdapter" />
                       <el-option label="SiliconFlow (硅基流动)" value="SiliconFlow" />
                       <el-option label="AI (自定义大模型)" value="AI" />
                       <el-option label="TikuGo" value="TikuGo" />
                       <el-option label="TikuManual (手动打字)" value="TikuManual" />
                     </el-select>
+                    <div class="field-hint">按选择顺序依次查询，前面的题库没命中时自动回退到下一个</div>
                   </el-form-item>
                   
                   <el-form-item label="自动提交答卷">
@@ -92,11 +127,15 @@
                     <el-slider v-model="config.tiku.cover_rate" :min="0" :max="1" :step="0.05" show-input></el-slider>
                   </el-form-item>
 
-                  <el-form-item label="API Token" v-if="['TikuYanxi', 'TikuLike'].includes(config.tiku.provider)">
-                    <el-input v-model="config.tiku.tokens" placeholder="言溪或LIKE的Token"></el-input>
+                  <el-form-item label="API Token" v-if="needTikuToken">
+                    <el-input v-model="config.tiku.tokens" placeholder="言溪或LIKE的Token，多个用英文逗号分隔"></el-input>
                   </el-form-item>
 
-                  <template v-if="config.tiku.provider === 'SiliconFlow' || config.tiku.provider === 'AI'">
+                  <el-form-item label="适配器地址" v-if="hasTikuProvider('TikuAdapter')">
+                    <el-input v-model="config.tiku.url" placeholder="例如 http://127.0.0.1:3000"></el-input>
+                  </el-form-item>
+
+                  <template v-if="needLlmConfig">
                     <el-form-item label="大模型 API Key">
                       <el-input v-model="config.tiku.key" placeholder="例如 sk-..."></el-input>
                     </el-form-item>
@@ -106,10 +145,50 @@
                     <el-form-item label="大模型名称">
                       <el-input v-model="config.tiku.model" placeholder="例如 deepseek-ai/DeepSeek-V3"></el-input>
                     </el-form-item>
-                    <el-form-item label="请求代理(可选)">
-                      <el-input v-model="config.tiku.http_proxy" placeholder="例如 http://127.0.0.1:7890，直连留空"></el-input>
-                    </el-form-item>
                   </template>
+
+                  <el-collapse class="advanced-collapse">
+                    <el-collapse-item title="高级参数 (一般保持默认即可)" name="advanced">
+                      <el-form-item label="请求代理(可选)">
+                        <el-input v-model="config.tiku.http_proxy" placeholder="例如 http://127.0.0.1:7890，直连留空"></el-input>
+                      </el-form-item>
+                      <el-form-item label="题库查询间隔(秒)">
+                        <el-input-number v-model="config.tiku.delay" :min="0" :max="30" :step="0.5" :precision="1"></el-input-number>
+                      </el-form-item>
+                      <el-form-item label="大模型请求间隔(秒)">
+                        <el-input-number v-model="config.tiku.min_interval_seconds" :min="0" :max="60" :step="1"></el-input-number>
+                      </el-form-item>
+                      <el-form-item label="JSON 模式">
+                        <el-switch v-model="config.tiku.json_mode" />
+                        <div class="field-hint">请求附带 response_format=json_object，服务端不支持时会报错</div>
+                      </el-form-item>
+                      <el-form-item label="extra_body">
+                        <el-input v-model="config.tiku.extra_body" type="textarea" :rows="2" placeholder='例如 {"thinking": {"type": "disabled"}}'></el-input>
+                        <div class="field-hint">JSON 格式，会透传给大模型接口；留空使用默认值</div>
+                      </el-form-item>
+                      <el-form-item label="LIKE 联网搜索">
+                        <el-switch v-model="config.tiku.likeapi_search" />
+                      </el-form-item>
+                      <el-form-item label="LIKE 视觉能力">
+                        <el-switch v-model="config.tiku.likeapi_vision" />
+                      </el-form-item>
+                      <el-form-item label="LIKE 模型名称">
+                        <el-input v-model="config.tiku.likeapi_model" placeholder="glm-4.5-air"></el-input>
+                      </el-form-item>
+                      <el-form-item label="GO 授权Token">
+                        <el-input v-model="config.tiku.go_authorization" placeholder="选填，用于解除限流"></el-input>
+                      </el-form-item>
+                      <el-form-item label="GO 请求间隔(秒)">
+                        <el-input-number v-model="config.tiku.go_min_interval" :min="0" :max="60" :step="0.5" :precision="1"></el-input-number>
+                      </el-form-item>
+                      <el-form-item label="手动模式出题方式">
+                        <el-select v-model="config.tiku.manual_mode_default" style="width: 100%">
+                          <el-option label="一次性输入所有(batch)" value="batch" />
+                          <el-option label="一题一输入(single)" value="single" />
+                        </el-select>
+                      </el-form-item>
+                    </el-collapse-item>
+                  </el-collapse>
                   
                   <el-form-item>
                     <el-button type="info" @click="testApi" :loading="testingApi" :disabled="!config.tiku.enabled">测试题库/API连接</el-button>
@@ -131,6 +210,9 @@
                   </el-form-item>
                   <el-form-item label="推送链接(URL)" v-if="config.notification.provider">
                     <el-input v-model="config.notification.url" placeholder="请填入推送平台提供的带Token URL"></el-input>
+                  </el-form-item>
+                  <el-form-item label="Telegram chat_id" v-if="config.notification.provider === 'Telegram'">
+                    <el-input v-model="config.notification.tg_chat_id" placeholder="例如 123456789，不加引号"></el-input>
                   </el-form-item>
                 </el-form>
               </el-tab-pane>
@@ -206,7 +288,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Moon, Sunny, Setting, Reading, Monitor } from '@element-plus/icons-vue'
 
@@ -232,9 +314,14 @@ const config = ref({
     speed: 1.0,
     jobs: 4,
     notopen_action: 'retry',
+    retry_interval: 1.0,
+    auto_sign: false,
+    work_redo_enabled: false,
+    work_max_retries: 3,
     add_learning_count: false,
     target_count: 100,
-    use_cookies: false
+    use_cookies: false,
+    verbose: false
   },
   tiku: {
     enabled: false,
@@ -245,13 +332,46 @@ const config = ref({
     key: '',
     endpoint: '',
     model: '',
-    http_proxy: ''
+    http_proxy: '',
+    delay: 1.0,
+    json_mode: false,
+    extra_body: '{"thinking": {"type": "disabled"}}',
+    likeapi_search: false,
+    likeapi_vision: true,
+    likeapi_model: 'glm-4.5-air',
+    likeapi_retry: true,
+    likeapi_retry_times: 3,
+    go_authorization: '',
+    go_min_interval: 1.0,
+    go_retry_times: 3,
+    go_retry_backoff: 1.2,
+    min_interval_seconds: 3,
+    manual_mode_default: 'batch',
+    manual_mode_separator: ';',
+    url: ''
   },
   notification: {
     provider: '',
-    url: ''
+    url: '',
+    tg_chat_id: ''
   }
 })
+
+// 后端把 provider 存成逗号分隔的字符串，界面上用多选表达回退顺序
+const tikuProviders = computed<string[]>({
+  get: () =>
+    String(config.value.tiku.provider || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  set: (val) => {
+    config.value.tiku.provider = val.join(',')
+  }
+})
+
+const hasTikuProvider = (name: string) => tikuProviders.value.includes(name)
+const needTikuToken = computed(() => hasTikuProvider('TikuYanxi') || hasTikuProvider('TikuLike'))
+const needLlmConfig = computed(() => hasTikuProvider('SiliconFlow') || hasTikuProvider('AI'))
 
 const courses = ref<any[]>([])
 const selectedCourses = ref<any[]>([])
@@ -502,5 +622,19 @@ body {
 
 .log-item {
   margin-bottom: 4px;
+}
+
+.field-hint {
+  width: 100%;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+.advanced-collapse {
+  margin: 8px 0 18px 150px;
+  width: calc(100% - 150px);
+  border-top: none;
 }
 </style>

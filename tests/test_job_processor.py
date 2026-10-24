@@ -127,5 +127,85 @@ class JobProcessorTestCase(unittest.TestCase):
         self.assertTrue(processor.retry_queue.empty())
 
 
+class JobProcessorStopTestCase(unittest.TestCase):
+    """桌面端"停止任务"按钮依赖 stop_event, 必须能及时返回且不残留计数."""
+
+    def setUp(self):
+        main.logger.remove()
+
+    def _make_processor(self, count=30, stop_event=None):
+        course = {"title": "课程"}
+        tasks = [
+            main.ChapterTask(
+                index=i,
+                point={"title": f"章节{i}", "has_finished": False},
+                course=course,
+            )
+            for i in range(count)
+        ]
+        config = {
+            "speed": 1.0,
+            "jobs": 1,
+            "notopen_action": "retry",
+            "retry_interval": 0.01,
+        }
+        processor = main.JobProcessor(
+            DummyChaoxing({"jobs": [{"type": "unknown"}], "job_info": {}}),
+            tasks,
+            config,
+            stop_event=stop_event,
+        )
+        processor.max_tries = 1000  # 不停止的话会长时间重试, 用于证明 stop 真的生效
+        return processor
+
+    def test_stop_event_cancels_pending_tasks(self):
+        stop_event = threading.Event()
+        processor = self._make_processor(stop_event=stop_event)
+        stop_event.set()
+
+        thread = threading.Thread(target=processor.run, daemon=True)
+        thread.start()
+        thread.join(5.0)
+
+        self.assertFalse(thread.is_alive(), "停止后 run() 仍未返回")
+        self.assertTrue(processor.stopped)
+        self.assertEqual(processor.task_queue.unfinished_tasks, 0)
+        self.assertTrue(processor.task_queue.empty())
+        self.assertTrue(processor.retry_queue.empty())
+
+    def test_stop_midway_returns(self):
+        stop_event = threading.Event()
+        processor = self._make_processor(stop_event=stop_event)
+
+        thread = threading.Thread(target=processor.run, daemon=True)
+        thread.start()
+        stop_event.set()  # 任务已经在跑, 模拟运行中点击停止
+        thread.join(5.0)
+
+        self.assertFalse(thread.is_alive(), "运行中停止后 run() 仍未返回")
+        self.assertEqual(processor.task_queue.unfinished_tasks, 0)
+
+    def test_stop_before_run_returns_immediately(self):
+        stop_event = threading.Event()
+        processor = self._make_processor(stop_event=stop_event)
+        stop_event.set()
+        processor.stop()  # 也支持直接调用 stop()
+
+        self._assert_finishes(processor)
+
+    def _assert_finishes(self, processor, timeout=5.0):
+        thread = threading.Thread(target=processor.run, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        self.assertFalse(thread.is_alive(), "run() 未在超时内返回")
+
+    def test_without_stop_event_behaves_as_before(self):
+        processor = self._make_processor(count=1)
+        processor.max_tries = 2
+        self._assert_finishes(processor)
+        self.assertFalse(processor.stopped)
+        self.assertEqual(processor.task_queue.unfinished_tasks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

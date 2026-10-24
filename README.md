@@ -50,6 +50,22 @@
 本项目除了传统的命令行交互外，还提供了一个现代化、全可视化的**独立桌面客户端 (GUI)** (基于 Vue3 + PyWebView 构建)。
 **它支持可视化的参数配置、扫码/账密登录、实时进度条面板、运行日志监控，以及可记忆的日间/夜间模式切换。**
 
+桌面端与命令行的能力已对齐，`config_template.ini` 里的可调项在界面上都能找到对应开关：
+
+| 命令行 / ini 配置 | 界面位置 |
+| --- | --- |
+| `--auto-sign` / `auto_sign` | 基础设置 → 自动签到 |
+| `--retry-interval` / `retry_interval` | 基础设置 → 失败重试间隔 |
+| `--add-learning-count` / `add_learning_count`、`target_count` | 基础设置 → 自动增加学习次数、目标学习次数 |
+| `work_redo_enabled` / `work_max_retries` | 基础设置 → 章节检测答错重做、最大重做次数 |
+| `use_cookies` | 基础设置 → 使用 Cookie 登录 |
+| `-v/--verbose` | 基础设置 → 详细日志(TRACE) |
+| `provider` 多题库回退、`TikuAdapter`、`url` | 题库/AI设置 → 题库引擎提供商（可多选）、适配器地址 |
+| `json_mode`、`extra_body`、`delay`、`likeapi_*`、`go_*`、`min_interval_seconds`、`manual_mode_*` | 题库/AI设置 → 高级参数 |
+| `notification.url` / `tg_chat_id` | 通知推送 → 推送链接、Telegram chat_id |
+
+> `notopen_action=ask`（遇到关闭章节时交互式询问）为命令行专用：桌面端只有「重试 / 跳过」两种选项。
+
 1. 安装运行依赖与 GUI 附加依赖:
 ```bash
 pip install -r requirements.txt

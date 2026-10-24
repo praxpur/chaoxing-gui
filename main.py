@@ -20,9 +20,9 @@ from api.live_process import LiveProcessor
 from api.process import increase_learning_count_for_course, sign_in_course
 
 try:
-    from queue import PriorityQueue, ShutDown
+    from queue import PriorityQueue, Empty, ShutDown
 except ImportError:
-    from queue import PriorityQueue
+    from queue import PriorityQueue, Empty
 
 
     class ShutDown(Exception):
@@ -355,8 +355,13 @@ class ChapterTask:
 
 
 class JobProcessor:
-    def __init__(self, chaoxing: Chaoxing, tasks: list[ChapterTask], config: dict[str, Any]):
-        """初始化任务处理器."""
+    def __init__(self, chaoxing: Chaoxing, tasks: list[ChapterTask], config: dict[str, Any],
+                 stop_event: threading.Event | None = None):
+        """初始化任务处理器.
+
+        stop_event 为可选的外部停止信号(桌面端"停止任务"按钮使用);
+        为 None 时保持原来的行为, 一直处理完队列为止.
+        """
         if "jobs" not in config or not config["jobs"]:
             config["jobs"] = 4
 
@@ -372,6 +377,17 @@ class JobProcessor:
         self.worker_num = config["jobs"]
         self.config = config
         self.retry_interval = config.get("retry_interval", 1.0)
+        self.stop_event = stop_event
+        self._stopped = False
+
+    def stop(self):
+        """请求停止: 取消队列里还没开始的任务, 已开始的章节会跑完."""
+        self._stopped = True
+
+    @property
+    def stopped(self) -> bool:
+        """是否已被停止."""
+        return self._stopped
 
     def run(self):
         for task in self.tasks:
@@ -384,10 +400,36 @@ class JobProcessor:
 
         threading.Thread(target=self.retry_thread, daemon=True).start()
 
+        if self.stop_event is not None:
+            threading.Thread(target=self._stop_watcher, daemon=True).start()
+
         self.task_queue.join()
         time.sleep(0.5)
         if hasattr(self.task_queue, "shutdown"):
             self.task_queue.shutdown()
+
+        if self._stopped:
+            logger.warning("任务已停止, 剩余未开始的任务已取消")
+
+    def _stop_watcher(self):
+        """等待外部停止信号, 并清空尚未开始的任务队列."""
+        self.stop_event.wait()
+        if self.task_queue.unfinished_tasks == 0:
+            return
+        self.stop()
+        logger.warning("收到停止信号, 正在取消尚未开始的任务...")
+        # 队列里每个任务都对应一次 put, 取出后必须 task_done, 否则 join() 永远不返回
+        self._drain(self.task_queue)
+        self._drain(self.retry_queue)
+
+    def _drain(self, queue: PriorityQueue):
+        """丢弃队列里剩余的任务, 并平衡 unfinished_tasks 计数."""
+        while True:
+            try:
+                queue.get_nowait()
+            except Empty:
+                return
+            self.task_queue.task_done()
 
     @log_error
     def worker_thread(self):
@@ -397,6 +439,11 @@ class JobProcessor:
             except ShutDown:
                 logger.info("Queue shut down")
                 return
+
+            # 停止后继续消费队列, 只是不再执行任务: 保证 run() 里迟到的任务也能被平衡掉
+            if self._stopped:
+                self.task_queue.task_done()
+                continue
 
             task.result = process_chapter(self.chaoxing, task.course, task.point, self.speed)
 
@@ -446,6 +493,10 @@ class JobProcessor:
         try:
             while True:
                 task = self.retry_queue.get()
+                if self._stopped:
+                    # 该任务原本占用的 unfinished_tasks 还没有 task_done, 这里补上
+                    self.task_queue.task_done()
+                    continue
                 self.task_queue.put(task)
                 # task_done is not called when a task failed and needs to be retried so if is reinserted into the queue,
                 # the task num will increase by one and become more than the real task number

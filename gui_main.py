@@ -118,37 +118,66 @@ def build_mapped_tiku_config(tiku_config, answer_enabled, check_llm):
     """将 GUI 题库配置映射为后端 Tiku 所需的 ini 风格配置字典。
 
     test_api_connection 与 save_config_and_login 共用，避免两处维护不一致。
+    高级项（延时/LIKE/GO/JSON 模式等）缺省时回落到与 config_template.ini 相同的默认值，
+    所以旧版 gui_config.json 依旧可用。
     """
     use_runtime_values = check_llm  # 连接测试时使用用户填写的硅基流动参数
+
+    def text(key, default=""):
+        """取出文本类配置, None 视为未填写."""
+        value = tiku_config.get(key, default)
+        return default if value is None else str(value)
+
+    def flag(key, default=False):
+        """把界面上的布尔开关转换成 ini 中的 true/false."""
+        value = tiku_config.get(key, default)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if value is None or value == "":
+            return "true" if default else "false"
+        return "true" if str(value).strip().lower() in {"1", "true", "yes", "y", "on"} else "false"
+
+    def boolean(key, default=False):
+        """likeapi_* 由后端按真值判断, 必须传真正的布尔值, 传 "false" 会被当成开启."""
+        value = tiku_config.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if value is None or value == "":
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    provider = text("provider") if answer_enabled else ""
     return {
-        "provider": str(tiku_config.get("provider", "TikuYanxi")) if answer_enabled else "",
-        "submit": "true" if tiku_config.get("submit", False) else "false",
-        "cover_rate": str(tiku_config.get("cover_rate", "0.9")),
-        "tokens": str(tiku_config.get("tokens", "")),
-        "endpoint": str(tiku_config.get("endpoint", "")),
-        "key": str(tiku_config.get("key", "")),
-        "model": str(tiku_config.get("model", "")),
+        "provider": provider,
+        "submit": flag("submit", False),
+        "cover_rate": text("cover_rate", "0.9"),
+        "tokens": text("tokens"),
+        "endpoint": text("endpoint"),
+        "key": text("key"),
+        "model": text("model"),
         "true_list": "正确,对,√,是",
         "false_list": "错误,错,×,否,不对,不正确",
-        "delay": "1.0",
+        "delay": text("delay", "1.0"),
         "check_llm_connection": "true" if check_llm else "false",
-        "likeapi_search": "false",
-        "likeapi_vision": "true",
-        "likeapi_model": "glm-4.5-air",
-        "likeapi_retry": "true",
-        "likeapi_retry_times": "3",
-        "go_authorization": "",
-        "go_min_interval": "1.0",
-        "go_retry_times": "3",
-        "go_retry_backoff": "1.2",
-        "min_interval_seconds": "3",
-        "http_proxy": str(tiku_config.get("http_proxy", "")),
-        "siliconflow_key": str(tiku_config.get("key", "")) if use_runtime_values else "",
-        "siliconflow_model": str(tiku_config.get("model", "deepseek-ai/DeepSeek-R1")) if use_runtime_values else "deepseek-ai/DeepSeek-R1",
-        "siliconflow_endpoint": str(tiku_config.get("endpoint", "https://api.siliconflow.cn/v1/chat/completions")) if use_runtime_values else "https://api.siliconflow.cn/v1/chat/completions",
-        "manual_mode_default": "batch",
-        "manual_mode_separator": ";",
-        "url": ""
+        "likeapi_search": boolean("likeapi_search", False),
+        "likeapi_vision": boolean("likeapi_vision", True),
+        "likeapi_model": text("likeapi_model", "glm-4.5-air"),
+        "likeapi_retry": boolean("likeapi_retry", True),
+        "likeapi_retry_times": text("likeapi_retry_times", "3"),
+        "go_authorization": text("go_authorization"),
+        "go_min_interval": text("go_min_interval", "1.0"),
+        "go_retry_times": text("go_retry_times", "3"),
+        "go_retry_backoff": text("go_retry_backoff", "1.2"),
+        "min_interval_seconds": text("min_interval_seconds", "3"),
+        "json_mode": flag("json_mode", False),
+        "extra_body": text("extra_body", '{"thinking": {"type": "disabled"}}'),
+        "http_proxy": text("http_proxy"),
+        "siliconflow_key": text("key") if use_runtime_values else "",
+        "siliconflow_model": text("model", "deepseek-ai/DeepSeek-R1") if use_runtime_values else "deepseek-ai/DeepSeek-R1",
+        "siliconflow_endpoint": text("endpoint", "https://api.siliconflow.cn/v1/chat/completions") if use_runtime_values else "https://api.siliconflow.cn/v1/chat/completions",
+        "manual_mode_default": text("manual_mode_default", "batch"),
+        "manual_mode_separator": text("manual_mode_separator", ";"),
+        "url": text("url")
     }
 
 # Now import chaoxing internals
@@ -156,6 +185,7 @@ from api.base import Chaoxing
 from api.answer import Tiku
 from main import init_chaoxing, filter_courses, JobProcessor, ChapterTask
 from api.notification import Notification
+from api.process import increase_learning_count_for_course, sign_in_course
 
 class Api:
     def __init__(self):
@@ -168,9 +198,14 @@ class Api:
                 "speed": 1.0,
                 "jobs": 4,
                 "notopen_action": "retry",
+                "retry_interval": 1.0,
+                "auto_sign": False,
+                "work_redo_enabled": False,
+                "work_max_retries": 3,
                 "add_learning_count": False,
                 "target_count": 100,
-                "use_cookies": False
+                "use_cookies": False,
+                "verbose": False
             },
             "tiku": {
                 "enabled": False,
@@ -181,11 +216,28 @@ class Api:
                 "key": "",
                 "endpoint": "",
                 "model": "",
-                "http_proxy": ""
+                "http_proxy": "",
+                "delay": 1.0,
+                "json_mode": False,
+                "extra_body": '{"thinking": {"type": "disabled"}}',
+                "likeapi_search": False,
+                "likeapi_vision": True,
+                "likeapi_model": "glm-4.5-air",
+                "likeapi_retry": True,
+                "likeapi_retry_times": 3,
+                "go_authorization": "",
+                "go_min_interval": 1.0,
+                "go_retry_times": 3,
+                "go_retry_backoff": 1.2,
+                "min_interval_seconds": 3,
+                "manual_mode_default": "batch",
+                "manual_mode_separator": ";",
+                "url": ""
             },
             "notification": {
                 "provider": "",
-                "url": ""
+                "url": "",
+                "tg_chat_id": ""
             }
         }
         self._load_config()
@@ -248,10 +300,20 @@ class Api:
                 if key in new_config:
                     self._config[key].update(new_config[key])
             self._save_config()
+            apply_log_level(bool(self._config["common"].get("verbose", False)))
 
             common_config = self._config["common"]
             tiku_config = self._config["tiku"]
             answer_enabled = tiku_config.get("enabled", False) is True
+
+            # init_chaoxing 在缺少账号密码时会走 input() 交互, 桌面端会卡死, 这里先拦截
+            if not common_config.get("use_cookies") and not (
+                common_config.get("username") and common_config.get("password")
+            ):
+                return {
+                    "success": False,
+                    "msg": "请填写账号和密码，或开启 Cookie 登录（需要程序目录下的 cookies.txt）",
+                }
 
             mapped_tiku_config = build_mapped_tiku_config(tiku_config, answer_enabled, check_llm=False)
             
@@ -312,24 +374,55 @@ class Api:
     def stop_tasks(self):
         if self._running_thread and self._running_thread.is_alive():
             self._stop_event.set()
-            logger.info("已发送停止信号，等待当前任务中断...")
+            logger.info("已发送停止信号，未开始的任务会被取消，正在执行的章节跑完后停止...")
             return {"success": True, "msg": "已发送停止信号"}
         return {"success": False, "msg": "当前没有运行的任务"}
+
+    def _notification_config(self):
+        """把界面上的通知配置转成后端需要的字符串字典."""
+        conf = self._config.get("notification", {}) or {}
+        return {key: ("" if value is None else str(value)) for key, value in conf.items()}
+
+    def _send_notification(self, message):
+        """按当前通知配置推送消息，失败只记日志，不影响主流程."""
+        conf = self._notification_config()
+        if not conf.get("provider"):
+            return
+        try:
+            notification = Notification()
+            notification.config_set(conf)
+            service = notification.get_notification_from_config()
+            service.init_notification()
+            service.send(message)
+        except Exception as exc:
+            logger.warning(f"发送通知失败: {exc}")
 
     def _run_tasks_thread(self, course_ids):
         try:
             logger.info(f"开始执行选定的 {len(course_ids)} 门课程...")
+            common_config = dict(self._config["common"])
+            try:
+                common_config["speed"] = min(2.0, max(1.0, float(common_config.get("speed", 1.0) or 1.0)))
+            except (TypeError, ValueError):
+                common_config["speed"] = 1.0
+            common_config["course_list"] = course_ids
+
             all_course = self._chaoxing.get_course_list()
-            
-            target_courses = [c for c in all_course if c.get("courseId") in course_ids]
-            common_config = self._config["common"]
+            # 与命令行一致: 按 (courseId, clazzId) 去重, 课程ID一个都没命中时直接报错
+            target_courses = filter_courses(all_course, course_ids)
+
+            # 签到有时效性, 所以在刷课开始前先处理当前进行中的签到
+            if common_config.get("auto_sign"):
+                logger.info("已开启自动签到, 开始检查签到活动...")
+                for course in target_courses:
+                    if self._stop_event.is_set():
+                        break
+                    sign_in_course(self._chaoxing, course)
 
             tasks = []
             for course in target_courses:
                 if self._stop_event.is_set():
-                    logger.warning("任务已被手动停止！")
                     break
-                    
                 logger.info(f"正在读取课程章节: {course['title']}")
                 point_list = self._chaoxing.get_course_point(
                     course["courseId"], course["clazzId"], course["cpi"]
@@ -339,38 +432,67 @@ class Api:
                     tasks.append(task)
 
             if tasks and not self._stop_event.is_set():
-                p = JobProcessor(self._chaoxing, tasks, common_config)
-                p.run()
-                
+                processor = JobProcessor(
+                    self._chaoxing, tasks, common_config, stop_event=self._stop_event
+                )
+                processor.run()
+
+            if self._stop_event.is_set():
+                logger.warning("任务已被手动停止！")
+                self._send_notification("超星学习通桌面版: 任务已被手动停止")
+                return
+
             logger.info("========== 所有选定的任务已完成 ==========")
-            
-            try:
-                notification_config = self._config.get("notification", {})
-                if notification_config.get("provider"):
-                    notification = Notification()
-                    notification.config_set(notification_config)
-                    notification = notification.get_notification_from_config()
-                    notification.init_notification()
-                    notification.send("超星学习通桌面版: 您选定的课程学习任务已完成")
-            except Exception as ne:
-                logger.warning(f"发送通知失败: {ne}")
-                
+            self._send_notification("超星学习通桌面版: 您选定的课程学习任务已完成")
+
+            # 刷课完成后，如果开启了增加章节学习次数，则执行
+            if common_config.get("add_learning_count"):
+                logger.info("刷课完成，开始增加章节学习次数...")
+                try:
+                    common_config["target_count"] = int(common_config.get("target_count", 100) or 100)
+                except (TypeError, ValueError):
+                    logger.warning("目标次数配置无效, 使用默认值 100")
+                    common_config["target_count"] = 100
+                for course in target_courses:
+                    if self._stop_event.is_set():
+                        break
+                    increase_learning_count_for_course(self._chaoxing, course, common_config)
+                logger.info("所有课程章节学习次数增加完成")
+                self._send_notification("超星学习通桌面版: 章节学习次数增加完成")
+
         except Exception as e:
             logger.error(f"执行任务发生异常: {e}")
             traceback.print_exc()
+            self._send_notification(
+                f"超星学习通桌面版: 出现错误 {type(e).__name__}: {e}"
+            )
+
+
+def apply_log_level(verbose: bool = False):
+    """按配置切换控制台日志级别, 详细日志额外输出 TRACE."""
+    logger.remove()
+    logger.add(
+        PollingLogHandler(),
+        format="{message}",
+        level="TRACE" if verbose else "DEBUG",
+        diagnose=False,
+    )
 
 
 def setup_logger():
     # Intercept loguru logs
-    logger.remove()
-    logger.add(PollingLogHandler(), format="{message}")
-    
+    apply_log_level(False)
+
     # Catch all raw prints and tracebacks safely (Polling mode doesn't crash PyWebView)
     sys.stdout = StdoutRedirector()
     sys.stderr = StdoutRedirector()
 
 if __name__ == '__main__':
     setup_logger()
+
+    # 打包后把工作目录固定到 exe 目录, 让 cookies.txt 等相对路径与配置文件保持一致
+    if getattr(sys, 'frozen', False):
+        os.chdir(_APP_DIR)
 
     api = Api()
     
