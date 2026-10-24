@@ -213,6 +213,29 @@ npm ci
 npm run build
 ```
 
+## :arrows_counterclockwise: 上游同步记录
+
+本仓库已合入上游 [Samueli924/chaoxing](https://github.com/Samueli924/chaoxing) 的以下 PR（保留原作者提交信息）：
+
+| PR | 内容 |
+| --- | --- |
+| #631 | 修复单选题答案含顿号被误判为多选而随机作答 |
+| #633 | AI 题库新增 `json_mode` 与 `extra_body` 配置，移除 DeepSeek 硬编码 |
+| #635 | 言溪题库查询失败时的健壮性处理 |
+| #637 | 日志与通知中的认证信息脱敏 |
+| #638 | wheel 安装包携带字体资源，`chaoxing` 命令可直接使用 |
+| #640 | 支持图片型多模态题目 |
+| #642 | 课程列表未命中时报错，不再静默学习全部课程 |
+| #643 | AI 题库兼容正文为空、答案只在 `reasoning_content` 的响应 |
+| #644 | 实现 `--auto-sign` 自动签到 |
+| #646 | 视频播放结束后按官方播放器规则重置续播位置 |
+
+未合入的 PR：
+
+- **#630**（任务校验/并发降档/本机控制台）：属于另一套并行架构的重写，会删除本仓库已有的自动签到接口与作答详情解析，功能上属于倒退，故保留在独立分支供评估。
+- **#634**（Flask 网页 GUI）：与现有 Vue3 + PyWebView 桌面客户端功能重复，且需重新引入 Flask 依赖，不合并。
+- **#639**（任务中心与提交前复核）：仍为 Draft，约 1.6 万行改动，与现有流程冲突面过大，暂不合并。
+
 ## :heart: CONTRIBUTORS
 
 ![Alt](https://repobeats.axiom.co/api/embed/d3931e84b4b2f17cbe60cafedb38114bdf9931cb.svg "Repobeats analytics image")  
