@@ -1,0 +1,31 @@
+# 版本控制与本地工具
+.git
+.github
+.workbuddy
+.idea
+.vscode
+
+# Python 缓存与测试
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本地配置与运行产物
+config.ini
+cookies.txt
+chaoxing.log
+logs/
+saves/
+gui_config.json
+
+# 前端源码与构建产物（Docker 镜像只运行命令行后端）
+frontend/
+gui_dist/
+dist/
+build/
+
+# 打包资源与测试无需进入运行镜像
+packaging/
+tests/

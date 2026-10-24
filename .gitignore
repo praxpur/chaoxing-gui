@@ -28,10 +28,10 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
+#  .spec 文件纳入版本管理，用于可复现打包（见 README 打包说明），故不再忽略
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
 
 # Installer logs
 pip-log.txt
@@ -131,7 +131,6 @@ logs/
 saves/
 build/
 dist/
-*.spec
 
 # python-uv.lock
 # just like Pipfile.lock,
@@ -161,3 +160,6 @@ myConfig/
 # GUI App
 gui_dist/
 gui_config.json
+
+# 图标尺寸检查图（由 packaging/build_logo_ico.py 生成）
+packaging/assets/logo_preview.png

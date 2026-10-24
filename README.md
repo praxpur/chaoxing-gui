@@ -21,14 +21,38 @@
 ## :point_up: 更新通知
 20241021更新通知： 感谢[sz134055](https://github.com/sz134055)提交代码[PR #360](https://github.com/Samueli924/chaoxing/pull/360)，**添加了对题库答题的支持**  
 
+## :file_folder: 项目结构
+
+```text
+.
+├── main.py                    # 命令行入口
+├── gui_main.py                # 桌面客户端入口（PyWebView + Python 桥接）
+├── api/                       # 学习、答题、直播、登录等核心业务模块
+├── frontend/                  # Vue 3 + TypeScript 桌面前端源码
+├── gui_dist/                  # 前端构建产物（生成，不纳入版本控制）
+├── resource/                  # 运行时资源（超星字体映射表）
+├── tests/                     # pytest 测试
+├── packaging/                 # 图标、版本信息、用户说明与图标生成脚本
+│   └── assets/                # 图标源文件及构建用 ICO
+├── config_template.ini        # 命令行配置文件模板
+├── ChaoxingDesktop.spec       # PyInstaller 可复现打包配置
+├── requirements.txt           # Python 运行依赖
+├── pyproject.toml             # 项目元数据与依赖声明
+├── Dockerfile                 # 命令行版容器构建
+├── .dockerignore              # 缩小容器构建上下文
+├── build/、dist/               # 本地打包中间产物与发布产物（生成，不纳入版本控制）
+└── .github/workflows/         # CI 与 Windows 客户端构建流程
+```
+
 ## :books: 使用方法
 
 ### 图形化桌面客户端 (GUI版本)
 本项目除了传统的命令行交互外，还提供了一个现代化、全可视化的**独立桌面客户端 (GUI)** (基于 Vue3 + PyWebView 构建)。
-**它支持可视化的参数配置、扫码/账密登录、实时进度条面板以及运行日志监控。**
+**它支持可视化的参数配置、扫码/账密登录、实时进度条面板、运行日志监控，以及可记忆的日间/夜间模式切换。**
 
-1. 安装 GUI 附加依赖:
+1. 安装运行依赖与 GUI 附加依赖:
 ```bash
+pip install -r requirements.txt
 pip install pywebview
 ```
 
@@ -38,10 +62,13 @@ python gui_main.py
 ```
 
 > **如何打包为独立可执行文件 (.exe)**
-> 你可以将其一键打包成无黑框的独立可执行文件，方便在任何电脑上双击运行：
-> `pip install pyinstaller`
-> `pyinstaller --noconsole --onefile --add-data "gui_dist;gui_dist" --name "ChaoxingDesktop" gui_main.py`
-> *(Mac/Linux 平台请将分号 `;` 改为冒号 `:`)*
+> 先构建前端（`cd frontend && npm ci && npm run build`，产物输出到根目录 `gui_dist/`），然后在项目根目录执行：
+> ```bash
+> pip install -r requirements.txt pywebview pyinstaller
+> pyinstaller --noconfirm --clean ChaoxingDesktop.spec
+> ```
+> 打包配置（onedir 无黑窗、应用图标、版本信息、资源与模块收集/排除）集中在已纳入版本管理的 `ChaoxingDesktop.spec` 中，保证可复现构建；需要调整时可先用带参数的 `pyinstaller ...` 命令重新生成 spec 再提交。应用图标为扁平化 Material Design 3 风格，运行 `python packaging/build_logo_ico.py` 可重新生成 `packaging/assets/logo.svg`、`logo.png` 与多尺寸 `app.ico`，版本信息见 `packaging/version_info.txt`，各资源用途见 `packaging/README.md`。
+> *(使用 `--onedir` 而非 `--onefile`，可避免 cv2 等组件单文件解包失败的问题。)*
 
 
 ### 源码运行（Python 3.13+）
@@ -164,6 +191,19 @@ python main.py -a ask  # 使用询问模式
 这功能会在所有课程学习任务结束后，或是程序出现错误时，使用外部通知服务推送消息告知你（~~有用但不多~~）
 
 与题库配置类似，不填写视为不使用，按照注释填写想要使用的外部通知服务（也是`provider`，大小写要一致），并填写必要的`url`
+
+## :white_check_mark: 测试与构建检查
+
+```bash
+# Python 测试
+pip install pytest
+python -m pytest tests -q
+
+# 前端构建检查
+cd frontend
+npm ci
+npm run build
+```
 
 ## :heart: CONTRIBUTORS
 

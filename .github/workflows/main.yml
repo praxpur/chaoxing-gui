@@ -27,7 +27,10 @@ jobs:
       - name: Install requirements
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pytest
+
+      - name: Run tests
+        run: python -m pytest tests -q
 
       - name: Build win bin
         run: pyinstaller -F main.py -n 'chaoxing' --add-data "resource;resource" --hidden-import=chardet

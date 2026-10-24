@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# unplugin 自动生成的声明文件（构建时重新生成）
+components.d.ts
+auto-imports.d.ts
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

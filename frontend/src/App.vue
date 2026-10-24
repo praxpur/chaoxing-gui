@@ -18,6 +18,10 @@
           <span>运行控制面板</span>
         </el-menu-item>
       </el-menu>
+      <div class="theme-toggle">
+        <el-switch v-model="isDark" inline-prompt :active-icon="Moon" :inactive-icon="Sunny" @change="toggleTheme" />
+        <span class="theme-label">{{ isDark ? '夜间模式' : '日间模式' }}</span>
+      </div>
     </el-aside>
 
     <el-container>
@@ -204,6 +208,15 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Moon, Sunny, Setting, Reading, Monitor } from '@element-plus/icons-vue'
+
+// 主题切换（启动时 main.ts 已从 localStorage 恢复）
+const isDark = ref(document.documentElement.classList.contains('dark'))
+const toggleTheme = (val: string | number | boolean) => {
+  const dark = Boolean(val)
+  document.documentElement.classList.toggle('dark', dark)
+  localStorage.setItem('theme', dark ? 'dark' : 'light')
+}
 
 const activeIndex = ref('1')
 const activeConfigTab = ref('common')
@@ -410,6 +423,12 @@ html, body, #app {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
+body {
+  background-color: var(--el-bg-color-page);
+  color: var(--el-text-color-primary);
+  transition: background-color 0.3s ease;
+}
+
 .layout-container {
   height: 100vh;
 }
@@ -436,6 +455,21 @@ html, body, #app {
 
 .el-menu {
   border-right: none;
+  flex: 1;
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px 0;
+  border-top: 1px solid #1f2d3d;
+}
+
+.theme-label {
+  color: #bfcbd9;
+  font-size: 13px;
 }
 
 .dashboard {
@@ -450,7 +484,7 @@ html, body, #app {
 .progress-label {
   font-size: 13px;
   margin-bottom: 5px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .log-container {

@@ -1,5 +1,30 @@
-# Vue 3 + TypeScript + Vite
+# 超星学习通桌面客户端 - 前端
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+基于 Vue 3 + TypeScript + Vite + Element Plus 构建的 GUI 前端，通过 PyWebView 与 Python 后端 (`gui_main.py`) 交互。
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+## 开发
+
+```bash
+npm install
+npm run dev
+```
+
+## 构建
+
+```bash
+npm run build
+```
+
+构建产物输出到项目根目录的 `gui_dist/`（见 `vite.config.ts` 中 `build.outDir`），
+`gui_main.py` 启动时会加载 `gui_dist/index.html`。使用相对路径 (`base: './'`) 以兼容
+pywebview 的 `file://` 协议加载。
+
+## 目录说明
+
+- `src/App.vue`：主界面（账号配置、课程列表、运行控制面板）
+- `src/main.ts`：入口，注册 Vue 与 Element Plus
+- `public/`：不参与打包处理的静态资源（favicon、图标）
+
+## 打包 exe
+
+前端构建完成后，回到项目根目录执行 PyInstaller 打包，详见根目录 `README.md` 的打包说明。

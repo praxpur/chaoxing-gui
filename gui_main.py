@@ -16,7 +16,15 @@ import traceback
 import builtins
 import tqdm
 
-GUI_CONFIG_PATH = "gui_config.json"
+# 配置文件放在 exe（或脚本）所在目录，避免 cwd 不可写时静默失败
+if getattr(sys, 'frozen', False):
+    _APP_DIR = os.path.dirname(sys.executable)
+else:
+    _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+GUI_CONFIG_PATH = os.path.join(_APP_DIR, "gui_config.json")
+
+# 全局共享的 devnull，避免每个 tqdm 实例各自 open 造成句柄泄漏
+_DEVNULL = open(os.devnull, 'w')
 
 # ---- UI State for Polling (Thread-Safe) ----
 ui_lock = threading.Lock()
@@ -43,7 +51,7 @@ import tqdm.std
 class GuiTqdm(tqdm.std.tqdm):
     def __init__(self, *args, **kwargs):
         self._gui_id = str(id(self))
-        kwargs['file'] = open(os.devnull, 'w')
+        kwargs['file'] = _DEVNULL
         super().__init__(*args, **kwargs)
         self._update_gui()
 
@@ -106,6 +114,43 @@ class StdoutRedirector:
     def flush(self):
         pass
 
+def build_mapped_tiku_config(tiku_config, answer_enabled, check_llm):
+    """将 GUI 题库配置映射为后端 Tiku 所需的 ini 风格配置字典。
+
+    test_api_connection 与 save_config_and_login 共用，避免两处维护不一致。
+    """
+    use_runtime_values = check_llm  # 连接测试时使用用户填写的硅基流动参数
+    return {
+        "provider": str(tiku_config.get("provider", "TikuYanxi")) if answer_enabled else "",
+        "submit": "true" if tiku_config.get("submit", False) else "false",
+        "cover_rate": str(tiku_config.get("cover_rate", "0.9")),
+        "tokens": str(tiku_config.get("tokens", "")),
+        "endpoint": str(tiku_config.get("endpoint", "")),
+        "key": str(tiku_config.get("key", "")),
+        "model": str(tiku_config.get("model", "")),
+        "true_list": "正确,对,√,是",
+        "false_list": "错误,错,×,否,不对,不正确",
+        "delay": "1.0",
+        "check_llm_connection": "true" if check_llm else "false",
+        "likeapi_search": "false",
+        "likeapi_vision": "true",
+        "likeapi_model": "glm-4.5-air",
+        "likeapi_retry": "true",
+        "likeapi_retry_times": "3",
+        "go_authorization": "",
+        "go_min_interval": "1.0",
+        "go_retry_times": "3",
+        "go_retry_backoff": "1.2",
+        "min_interval_seconds": "3",
+        "http_proxy": str(tiku_config.get("http_proxy", "")),
+        "siliconflow_key": str(tiku_config.get("key", "")) if use_runtime_values else "",
+        "siliconflow_model": str(tiku_config.get("model", "deepseek-ai/DeepSeek-R1")) if use_runtime_values else "deepseek-ai/DeepSeek-R1",
+        "siliconflow_endpoint": str(tiku_config.get("endpoint", "https://api.siliconflow.cn/v1/chat/completions")) if use_runtime_values else "https://api.siliconflow.cn/v1/chat/completions",
+        "manual_mode_default": "batch",
+        "manual_mode_separator": ";",
+        "url": ""
+    }
+
 # Now import chaoxing internals
 from api.base import Chaoxing
 from api.answer import Tiku
@@ -167,8 +212,11 @@ class Api:
                 print("Failed to load config:", e)
 
     def _save_config(self):
-        with open(GUI_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(self._config, f, indent=4)
+        try:
+            with open(GUI_CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._config, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save config to {GUI_CONFIG_PATH}: {e}")
 
     def get_config(self):
         return {"success": True, "data": self._config}
@@ -179,37 +227,8 @@ class Api:
             tiku_config = new_config.get("tiku", self._config.get("tiku", {}))
             if tiku_config.get("enabled", False) is not True:
                 return {"success": False, "msg": "答题功能未启用，请先开启“启用答题”开关。"}
-            
-            mapped_tiku_config = {
-                "provider": str(tiku_config.get("provider", "TikuYanxi")),
-                "submit": "true" if tiku_config.get("submit", False) else "false",
-                "cover_rate": str(tiku_config.get("cover_rate", "0.9")),
-                "tokens": str(tiku_config.get("tokens", "")),
-                "endpoint": str(tiku_config.get("endpoint", "")),
-                "key": str(tiku_config.get("key", "")),
-                "model": str(tiku_config.get("model", "")),
-                "true_list": "正确,对,√,是",
-                "false_list": "错误,错,×,否,不对,不正确",
-                "delay": "1.0",
-                "check_llm_connection": "true",
-                "likeapi_search": "false",
-                "likeapi_vision": "true",
-                "likeapi_model": "glm-4.5-air",
-                "likeapi_retry": "true",
-                "likeapi_retry_times": "3",
-                "go_authorization": "",
-                "go_min_interval": "1.0",
-                "go_retry_times": "3",
-                "go_retry_backoff": "1.2",
-                "min_interval_seconds": "3",
-                "http_proxy": str(tiku_config.get("http_proxy", "")),
-                "siliconflow_key": str(tiku_config.get("key", "")),
-                "siliconflow_model": str(tiku_config.get("model", "deepseek-ai/DeepSeek-R1")),
-                "siliconflow_endpoint": str(tiku_config.get("endpoint", "https://api.siliconflow.cn/v1/chat/completions")),
-                "manual_mode_default": "batch",
-                "manual_mode_separator": ";",
-                "url": ""
-            }
+
+            mapped_tiku_config = build_mapped_tiku_config(tiku_config, answer_enabled=True, check_llm=True)
             
             from api.answer import Tiku
             test_tiku = Tiku.get_tiku_from_config(mapped_tiku_config, config_path=None)
@@ -233,37 +252,8 @@ class Api:
             common_config = self._config["common"]
             tiku_config = self._config["tiku"]
             answer_enabled = tiku_config.get("enabled", False) is True
-            
-            mapped_tiku_config = {
-                "provider": str(tiku_config.get("provider", "TikuYanxi")) if answer_enabled else "",
-                "submit": "true" if tiku_config.get("submit", False) else "false",
-                "cover_rate": str(tiku_config.get("cover_rate", "0.9")),
-                "tokens": str(tiku_config.get("tokens", "")),
-                "endpoint": str(tiku_config.get("endpoint", "")),
-                "key": str(tiku_config.get("key", "")),
-                "model": str(tiku_config.get("model", "")),
-                "true_list": "正确,对,√,是",
-                "false_list": "错误,错,×,否,不对,不正确",
-                "delay": "1.0",
-                "check_llm_connection": "false",
-                "likeapi_search": "false",
-                "likeapi_vision": "true",
-                "likeapi_model": "glm-4.5-air",
-                "likeapi_retry": "true",
-                "likeapi_retry_times": "3",
-                "go_authorization": "",
-                "go_min_interval": "1.0",
-                "go_retry_times": "3",
-                "go_retry_backoff": "1.2",
-                "min_interval_seconds": "3",
-                "http_proxy": str(tiku_config.get("http_proxy", "")),
-                "siliconflow_key": "",
-                "siliconflow_model": "deepseek-ai/DeepSeek-R1",
-                "siliconflow_endpoint": "https://api.siliconflow.cn/v1/chat/completions",
-                "manual_mode_default": "batch",
-                "manual_mode_separator": ";",
-                "url": ""
-            }
+
+            mapped_tiku_config = build_mapped_tiku_config(tiku_config, answer_enabled, check_llm=False)
             
             if not answer_enabled:
                 logger.info("答题功能已关闭，将跳过章节检测答题")

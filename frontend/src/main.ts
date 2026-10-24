@@ -1,14 +1,12 @@
 import { createApp } from 'vue'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import App from './App.vue'
 
-const app = createApp(App)
-
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
+// 启动时恢复上次主题（默认日间模式）
+if (localStorage.getItem('theme') === 'dark') {
+  document.documentElement.classList.add('dark')
 }
 
-app.use(ElementPlus)
+// Element Plus 组件/样式由 unplugin 按需引入（见 vite.config.ts）
+const app = createApp(App)
 app.mount('#app')
